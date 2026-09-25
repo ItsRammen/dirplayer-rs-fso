@@ -6,7 +6,8 @@ use crate::{
         context_vars::{player_get_context_var, player_set_context_var, read_context_var_args},
         datum_formatting::{format_concrete_datum, datum_to_string_for_concat},
         datum_ref::DatumRef,
-        handlers::datum_handlers::string_chunk::StringChunkUtils,
+        cast_member::CastMemberType,
+        handlers::datum_handlers::string_chunk::{StringChunkHandlers, StringChunkUtils},
         reserve_player_mut, DirPlayer, HandlerExecutionResult, ScriptError,
     },
 };
@@ -261,6 +262,51 @@ impl StringBytecodeHandler {
                 player.get_datum(&value_ref).int_value()
             }
         }
+    }
+
+    /// `hilite line 3 of field "x"` — the command form (opcode 0x18) of
+    /// `chunk.hilite()`: selects the chunk's characters in the field so the
+    /// renderer paints the selection band. The stack holds the eight chunk
+    /// operands, then the field, then (D5+) its cast.
+    pub fn hilite_chunk(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        reserve_player_mut(|player| {
+            let cast_id_ref = if player.movie.dir_version >= 500 {
+                Some(player.scopes.get_mut(ctx.scope_ref).unwrap().stack.pop().unwrap())
+            } else {
+                None
+            };
+            let field_id_ref = player.scopes.get_mut(ctx.scope_ref).unwrap().stack.pop().unwrap();
+            let chunk_expr = Self::read_single_chunk_ref(player, ctx)?;
+
+            let member_ref = {
+                let field_id = player.get_datum(&field_id_ref);
+                let cast_id = cast_id_ref.as_ref().map(|r| player.get_datum(r));
+                player.movie.cast_manager.find_member_ref_by_identifiers(field_id, cast_id, &player.allocator)?
+            };
+            let Some(member_ref) = member_ref else {
+                return Ok(HandlerExecutionResult::Advance);
+            };
+            let text = match player.movie.cast_manager.find_member_by_ref(&member_ref).map(|m| &m.member_type) {
+                Some(CastMemberType::Field(f)) => f.text.clone(),
+                Some(CastMemberType::Text(t)) => t.text.clone(),
+                _ => return Ok(HandlerExecutionResult::Advance),
+            };
+            let (start, end) = StringChunkHandlers::resolve_chunk_char_range(&text, &chunk_expr);
+            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                match &mut member.member_type {
+                    CastMemberType::Field(f) => {
+                        f.sel_start = start as i32;
+                        f.sel_end = end as i32;
+                    }
+                    CastMemberType::Text(t) => {
+                        t.sel_start = start as i32;
+                        t.sel_end = end as i32;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(HandlerExecutionResult::Advance)
+        })
     }
 
     fn read_single_chunk_ref(player: &mut DirPlayer, ctx: &BytecodeHandlerContext) -> Result<StringChunkExpr, ScriptError> {
