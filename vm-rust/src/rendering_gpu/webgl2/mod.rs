@@ -2884,8 +2884,15 @@ impl WebGL2Renderer {
                     // if they happen to be the focus owner (e.g. Coke Studios'
                     // `nav_v-ego_search_motto` is a non-editable text panel that
                     // would otherwise show a caret at the end of the motto text).
-                    let has_focus = field_member.editable
-                        && player.keyboard_focus_sprite == channel_num;
+                    // A read-only field shows a selection made by `hilite`
+                    // (list fields: ROTL's Who's Online, friends and guild
+                    // lists hilite the clicked line) whether or not it has
+                    // focus. With a selection there's no caret to draw, so
+                    // treating it as focused only paints the highlight.
+                    let has_focus = (field_member.editable
+                        && player.keyboard_focus_sprite == channel_num)
+                        || (!field_member.editable
+                            && field_member.sel_start != field_member.sel_end);
 
                     let mut style = 0u8;
                     let style_lc = field_member.font_style.to_lowercase();
