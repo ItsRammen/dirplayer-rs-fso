@@ -1896,6 +1896,7 @@ impl BuiltInHandlerManager {
             }
             Some(BuiltInSymbol::Delay) => MovieHandlers::delay(args),
             Some(BuiltInSymbol::Halt) => MovieHandlers::halt(args),
+            Some(BuiltInSymbol::Quit) => MovieHandlers::quit(args),
             Some(BuiltInSymbol::StartTimer) => Self::start_timer(args),
             Some(BuiltInSymbol::ExternalEvent) => Self::external_event(args),
             Some(BuiltInSymbol::DontPassEvent) => Self::dont_pass_event(args),

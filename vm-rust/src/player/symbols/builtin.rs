@@ -547,6 +547,7 @@ define_builtin_symbols! {
     "stopSound" => StopSound,
     "delay" => Delay,
     "halt" => Halt,
+    "quit" => Quit,
     "startTimer" => StartTimer,
     "externalEvent" => ExternalEvent,
     "dontPassEvent" => DontPassEvent,

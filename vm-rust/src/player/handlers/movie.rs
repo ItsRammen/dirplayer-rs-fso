@@ -1535,6 +1535,27 @@ impl MovieHandlers {
         })
     }
 
+    /// `quit`. A projector exits; a browser can't close its own tab, so stop
+    /// playback like `halt` and tell the page (`window.__dirplayerQuit`, when
+    /// it defines one) so it can say what happened. ROTL's File > Quit Game
+    /// ends in `quit()` after telling the server it left.
+    pub fn quit(_args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            player.is_playing = false;
+        });
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(window) = web_sys::window() {
+                if let Ok(hook) = js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("__dirplayerQuit")) {
+                    if let Some(hook) = wasm_bindgen::JsCast::dyn_ref::<js_sys::Function>(&hook) {
+                        let _ = hook.call0(&wasm_bindgen::JsValue::NULL);
+                    }
+                }
+            }
+        }
+        Ok(DatumRef::Void)
+    }
+
     pub fn halt(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             // Stop movie playback
