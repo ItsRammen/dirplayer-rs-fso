@@ -328,6 +328,54 @@ pub(crate) fn apply_text_edit(
     }
 }
 
+/// Caret index (a byte offset into `text`) for a click at `local_x`,
+/// `local_y` inside a field whose face has no bitmap font, so the browser
+/// draws it. Each character boundary on the clicked line is measured with
+/// Canvas2D, as the native text renderer measures, and the nearest one wins.
+/// Lines are split on CR only; word wrap isn't modelled.
+#[cfg(target_arch = "wasm32")]
+fn native_xy_to_caret_index(
+    text: &str,
+    font: &str,
+    font_size: u16,
+    line_h: i32,
+    local_x: i32,
+    local_y: i32,
+) -> Option<i32> {
+    use wasm_bindgen::JsCast;
+    let canvas: web_sys::HtmlCanvasElement = web_sys::window()?
+        .document()?
+        .create_element("canvas")
+        .ok()?
+        .dyn_into()
+        .ok()?;
+    let ctx: web_sys::CanvasRenderingContext2d =
+        canvas.get_context("2d").ok()??.dyn_into().ok()?;
+    ctx.set_font(&format!("{}px {}", font_size, font));
+
+    let lines: Vec<&str> = text.split('\r').collect();
+    let line_idx = if line_h > 0 { (local_y.max(0) / line_h) as usize } else { 0 };
+    let line_idx = line_idx.min(lines.len().saturating_sub(1));
+    let line_start: usize = lines[..line_idx].iter().map(|l| l.len() + 1).sum();
+    let line = lines[line_idx];
+
+    let x = local_x as f64;
+    let mut best = (f64::MAX, 0usize);
+    for b in line.char_indices().map(|(b, _)| b).chain(std::iter::once(line.len())) {
+        let w = ctx.measure_text(&line[..b]).map(|m| m.width()).unwrap_or(0.0);
+        let d = (w - x).abs();
+        if d < best.0 {
+            best = (d, b);
+        }
+    }
+    Some((line_start + best.1) as i32)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_xy_to_caret_index(_: &str, _: &str, _: u16, _: i32, _: i32, _: i32) -> Option<i32> {
+    None
+}
+
 /// Mode for `set_caret_at_screen` — controls how the new position interacts
 /// with the existing selection.
 pub(crate) enum CaretAtMode {
@@ -424,7 +472,7 @@ pub(crate) fn set_caret_at_screen(
         // Compute caret index from movie coords, using the appropriate font.
         let caret_idx = match &snapshot {
             MemberSnapshot::Field { text, font, font_size, font_id, alignment,
-                                    fixed_line_space, top_spacing, word_wrap: _ } => {
+                                    fixed_line_space, top_spacing, word_wrap: _ } => 'field: {
                 // Mirror the renderer: rasterise the font at the SAME scaled
                 // size the PFR atlas uses (`font_size * stage_scale`), AND
                 // use the SAME font-lookup path as the renderer so we get
@@ -453,7 +501,23 @@ pub(crate) fn set_caret_at_screen(
                             .and_then(|fr| player.font_manager.fonts.get(&fr).cloned())
                     })
                 });
-                let Some(f) = font_opt else { return false };
+                let Some(f) = font_opt else {
+                    // No bitmap font for this face: the field is drawn by the
+                    // browser (Canvas2D), so measure it the same way.
+                    let line_h = if *fixed_line_space > 0 {
+                        *fixed_line_space as i32
+                    } else {
+                        ((*font_size as f64) * 1.2).round() as i32
+                    };
+                    match native_xy_to_caret_index(
+                        text, font, *font_size, line_h,
+                        movie_x - sprite_loc_h,
+                        movie_y - sprite_loc_v - *top_spacing as i32,
+                    ) {
+                        Some(idx) => break 'field idx,
+                        None => return false,
+                    }
+                };
                 // Scale the click coords into the renderer's coordinate
                 // space too. movie_x is in unscaled movie space; the
                 // renderer's char_widths sum is in scaled space.
