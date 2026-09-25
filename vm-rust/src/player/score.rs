@@ -372,8 +372,18 @@ impl Score {
         // For cast 65535 (relative cast reference), we only use the filmloop's own cast.
         // We do NOT search other casts because that would attach unrelated behaviors
         // from the main movie to filmloop sprites.
+        // A behaviour slot must name a script member. A slot left pointing at a
+        // member that's since become a bitmap (or anything else) resolves here to
+        // that member's own cast-member script, which Director never attaches as
+        // a behaviour. ROTL's map frames have one such stale slot pointing at the
+        // "cloudy" bitmap, whose member script is old character-creation code.
         let script_exists = reserve_player_mut(|player| {
-            player.movie.cast_manager.get_script_by_ref(&script_ref).is_some()
+            let is_script_member = player
+                .movie
+                .cast_manager
+                .find_member_by_ref(&script_ref)
+                .map_or(true, |m| matches!(m.member_type, crate::player::cast_member::CastMemberType::Script(_)));
+            is_script_member && player.movie.cast_manager.get_script_by_ref(&script_ref).is_some()
         });
         let found_in_other_lib: Option<i32> = None;
 
