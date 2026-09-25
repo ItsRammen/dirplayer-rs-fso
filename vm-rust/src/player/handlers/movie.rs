@@ -704,6 +704,7 @@ impl MovieHandlers {
                 let sprite = player.movie.score.get_sprite_mut(sprite_number as i16);
                 sprite.puppet = false;
                 sprite.entered = false;
+                sprite.lingo_positioned = false;
                 sprite.exited = false;
                 sprite.script_instance_list.clear();
                 // Mark for revert on the NEXT frame tick. If the sprite is not

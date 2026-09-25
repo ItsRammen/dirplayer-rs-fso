@@ -1180,6 +1180,7 @@ impl Score {
                 }
 
                 sprite.base_loc_h = sprite.loc_h;
+                sprite.lingo_positioned = false;
                 sprite.base_loc_v = sprite.loc_v;
                 sprite.base_width = sprite.width;
                 sprite.base_height = sprite.height;
@@ -1412,6 +1413,7 @@ impl Score {
                     sprite.blend = convert_raw_blend(data.blend, data.sprite_flags, dir_version);
                     // Set base_* values so tweens can work
                     sprite.base_loc_h = sprite.loc_h;
+                    sprite.lingo_positioned = false;
                     sprite.base_loc_v = sprite.loc_v;
                     sprite.base_width = sprite.width;
                     sprite.base_height = sprite.height;
@@ -2782,6 +2784,7 @@ impl Score {
 
             // Also update runtime values to match (apply_tween_modifiers will handle tweening)
             sprite.base_loc_h = sprite.loc_h;
+            sprite.lingo_positioned = false;
             sprite.base_loc_v = sprite.loc_v;
             sprite.base_width = sprite.width;
             sprite.base_height = sprite.height;
@@ -2812,6 +2815,11 @@ impl Score {
             if sprite.puppet {
                 continue;
             }
+            // Nor to a position a script set during the span: the playhead
+            // idling on one frame re-runs this every frame, and it put ROTL's
+            // "what am I standing on" probe (sprite 14, path-tweened over its
+            // span) back on its tween each frame, so no exit ever matched.
+            let lingo_positioned = sprite.lingo_positioned;
 
             let Some(keyframes) = self.keyframes_cache.get(&sprite_num) else {
                 continue;
@@ -2824,6 +2832,7 @@ impl Score {
                     .as_ref()
                     .is_some_and(|t| t.is_path_tweened())
                     && path.is_active_at_frame(frame)
+                    && !lingo_positioned
                 {
                     if let Some((dx, dy)) = path.get_delta_at_frame(
                         frame,
@@ -5394,6 +5403,20 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
         if affects_render_order {
             reserve_player_mut(|player| {
                 player.movie.score.invalidate_render_channel_cache();
+            });
+        }
+        let positions = ["loc", "locH", "locV", "rect", "left", "top", "right", "bottom", "quad"]
+            .iter()
+            .any(|p| prop_name.eq_ignore_ascii_case(p));
+        let unpuppets = prop_name.eq_ignore_ascii_case("puppet");
+        if positions || unpuppets {
+            reserve_player_mut(|player| {
+                let sprite = player.movie.score.get_sprite_mut(sprite_id);
+                if positions {
+                    sprite.lingo_positioned = true;
+                } else if !sprite.puppet {
+                    sprite.lingo_positioned = false;
+                }
             });
         }
         let prop_name_builtin = prop_name.into_builtin();

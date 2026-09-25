@@ -171,6 +171,11 @@ pub struct Sprite {
     /// bounding-box approximation and snap it back to the bitmap's native
     /// size). Used by hackey's pseudo-3D `Translate` to shrink distant sprites.
     pub explicit_lingo_size: bool,
+    /// Set when a script positions the sprite (`loc`, `locH`, `locV`, `rect`,
+    /// ...). Director keeps a script-set property for the rest of the sprite's
+    /// span, so the Score's path tween must not move it back. Cleared when the
+    /// span is entered again or the sprite is unpuppeted.
+    pub lingo_positioned: bool,
     // Base (score-defined) values
     pub base_loc_h: i32,
     pub base_loc_v: i32,
@@ -298,6 +303,7 @@ impl Sprite {
             has_size_changed: false,
             bitmap_size_owned_by_sprite: false,
             explicit_lingo_size: false,
+            lingo_positioned: false,
             base_loc_h: 0,
             base_loc_v: 0,
             base_width: 0,
@@ -384,6 +390,7 @@ impl Sprite {
         self.has_size_changed = false;
         self.bitmap_size_owned_by_sprite = false;
         self.explicit_lingo_size = false;
+        self.lingo_positioned = false;
         self.retained_rect = None;
         self.flash_asserted_frame = None;
         self.flash_prev_frame = 0;
