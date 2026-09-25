@@ -4480,6 +4480,17 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
     if !in_range {
         return Ok(());
     }
+    // Remember where the sprite was drawn before its first change since the
+    // last draw (see `DirPlayer::drawn_rects`).
+    reserve_player_mut(|player| {
+        if !player.drawn_rects.contains_key(&sprite_id) {
+            if let Ok(Datum::Rect(v, _)) = sprite_get_prop(player, sprite_id, Symbol::builtin(BuiltInSymbol::Rect)) {
+                player
+                    .drawn_rects
+                    .insert(sprite_id, (v[0] as i32, v[1] as i32, v[2] as i32, v[3] as i32));
+            }
+        }
+    });
     // Assigning VOID to an appearance property leaves it alone. VOID is not a
     // value any of these can hold, and Director neither raises nor coerces it
     // to zero — Merlin's Revenge proves both halves. Its bSpriteParams mirrors

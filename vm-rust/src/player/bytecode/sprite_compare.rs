@@ -159,6 +159,10 @@ impl SpriteCompareBytecodeHandler {
 
             // Helper function to get rect bounds
             let mut get_rect_bounds = |sprite_num: i16| -> Result<(i32, i32, i32, i32), ScriptError> {
+                // Director compares where the sprites were last drawn.
+                if let Some(drawn) = player.drawn_rects.get(&sprite_num) {
+                    return Ok(*drawn);
+                }
                 let rect_datum = sprite_get_prop(player, sprite_num, Symbol::builtin(BuiltInSymbol::Rect))?;
 
                 debug!("  sprite {} rect datum: {}", sprite_num, format_concrete_datum(&rect_datum, player));
@@ -341,6 +345,10 @@ impl SpriteCompareBytecodeHandler {
 
             // Helper function to get rect bounds
             let mut get_rect_bounds = |sprite_num: i16| -> Result<(i32, i32, i32, i32), ScriptError> {
+                // Director compares where the sprites were last drawn.
+                if let Some(drawn) = player.drawn_rects.get(&sprite_num) {
+                    return Ok(*drawn);
+                }
                 let rect_datum = sprite_get_prop(player, sprite_num, Symbol::builtin(BuiltInSymbol::Rect))?;
 
                 match rect_datum {

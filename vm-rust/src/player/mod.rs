@@ -321,6 +321,12 @@ pub struct DirPlayer {
     pub last_mouse_down_time: i64,
     pub is_double_click: bool,
     pub mouse_down_sprite: i16,
+    /// Where `mouse_down_sprite` was when the button went down, to tell
+    /// whether the movie has since moved it (see MouseUp in commands.rs).
+    pub mouse_down_sprite_loc: (i32, i32),
+    /// Frame cycles completed; input handling waits on it like Director,
+    /// which processes clicks between frames, after exitFrame.
+    pub frame_cycles: u64,
     pub drag_offset: (i32, i32),
     /// In-progress drag of a `#scroll` field's lift: (sprite number, grab offset
     /// from the lift's top edge in local px). Cleared on mouse up.
@@ -519,6 +525,12 @@ pub struct DirPlayer {
     pub current_frame_tempo: u32,  // Cached tempo for the current frame
     pub has_player_frame_changed: bool,
     pub stage_dirty: bool, // Set when any sprite property changes; cleared after render
+    /// Where sprites were when the stage was last drawn, for the ones a
+    /// script has changed since. `intersects` and `within` compare these
+    /// drawn rects, as Director does: ROTL parks a proximity sprite on the
+    /// player, calls updateStage, hides it again, and only then asks whether
+    /// it intersects the NPC — the "close enough to give/trade" test.
+    pub drawn_rects: std::collections::HashMap<i16, (i32, i32, i32, i32)>,
     /// Set when an input handler (mouse or key) starts running, cleared once
     /// the next exitFrame has run. While it is set the stage is not redrawn:
     /// Director draws once per frame, after the handlers of that frame and
@@ -777,6 +789,8 @@ impl DirPlayer {
             last_mouse_down_time: 0,
             is_double_click: false,
             mouse_down_sprite: 0,
+            mouse_down_sprite_loc: (0, 0),
+            frame_cycles: 0,
             drag_offset: (0, 0),
             field_scroll_drag: None,
             trails_bitmap: None,
@@ -843,6 +857,7 @@ impl DirPlayer {
             current_frame_tempo: 30,  // Default to 30 fps
             has_player_frame_changed: false,
             stage_dirty: true,
+            drawn_rects: std::collections::HashMap::new(),
             draw_hold_since_ms: None,
             preview_dirty: true,
             has_frame_changed_in_go: false,
@@ -7061,6 +7076,7 @@ pub async fn run_frame_loop() {
         // Run one frame cycle (scripts + advance)
         let (playing, _) = run_single_frame().await;
         is_playing = playing;
+        reserve_player_mut(|player| player.frame_cycles = player.frame_cycles.wrapping_add(1));
 
         if !is_playing {
             stop_movie_sequence().await;
