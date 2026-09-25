@@ -1839,7 +1839,16 @@ pub async fn dispatch_event_to_all_behaviors(
             // A sprite with no behaviors may still carry a cast member script,
             // which is the next receiver in Director's message order — so the
             // channel can't be skipped on an empty behavior list alone.
-            let member_handler = if number > 0 {
+            // ...but only for the events Director routes to cast member scripts
+            // (mouse and keyboard). Frame events (prepareFrame, enterFrame,
+            // exitFrame, beginSprite, endSprite, idle) go to behaviors, the frame
+            // script and movie scripts only, so a member script's `exitFrame`
+            // never runs in Director.
+            let is_frame_event = matches!(
+                handler_name.as_str().to_ascii_lowercase().as_str(),
+                "prepareframe" | "enterframe" | "exitframe" | "beginsprite" | "endsprite" | "idle"
+            );
+            let member_handler = if number > 0 && !is_frame_event {
                 get_member_script_handler(player, number as i16, handler_name.as_str())
             } else {
                 None
