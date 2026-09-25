@@ -264,6 +264,46 @@ impl StringBytecodeHandler {
         }
     }
 
+    /// `put v into/before/after <chunks> of s` where `chunks` runs outermost
+    /// to innermost (`word 3 of line 2` is [line 2, word 3]). The innermost
+    /// chunk takes the put; each enclosing chunk is rewritten with the result.
+    /// Applying only the outermost chunk replaced the whole line: ROTL builds
+    /// its collision map with `put "X" into word x of line y of CollisionMap`,
+    /// and every blocked tile wiped its row.
+    fn put_into_nested_chunk(
+        string: &str,
+        chunks: &[StringChunkExpr],
+        put_type: &PutType,
+        value: &str,
+    ) -> Result<String, ScriptError> {
+        let (outer, rest) = chunks
+            .split_first()
+            .ok_or_else(|| ScriptError::new("putChunk: no chunk".to_string()))?;
+        if rest.is_empty() {
+            return match put_type {
+                PutType::Into => StringChunkUtils::string_by_putting_into_chunk(string, outer, value),
+                PutType::Before => StringChunkUtils::string_by_putting_before_chunk(string, outer, value),
+                PutType::After => StringChunkUtils::string_by_putting_after_chunk(string, outer, value),
+            };
+        }
+        let inner = StringChunkUtils::resolve_chunk_expr_string(string, outer)?;
+        let new_inner = Self::put_into_nested_chunk(&inner, rest, put_type, value)?;
+        StringChunkUtils::string_by_putting_into_chunk(string, outer, &new_inner)
+    }
+
+    /// `delete <chunks> of s`, nested the same way as `put_into_nested_chunk`.
+    fn delete_nested_chunk(string: &str, chunks: &[StringChunkExpr]) -> Result<String, ScriptError> {
+        let (outer, rest) = chunks
+            .split_first()
+            .ok_or_else(|| ScriptError::new("deleteChunk: no chunk".to_string()))?;
+        if rest.is_empty() {
+            return StringChunkUtils::string_by_deleting_chunk(string, outer);
+        }
+        let inner = StringChunkUtils::resolve_chunk_expr_string(string, outer)?;
+        let new_inner = Self::delete_nested_chunk(&inner, rest)?;
+        StringChunkUtils::string_by_putting_into_chunk(string, outer, &new_inner)
+    }
+
     /// `hilite line 3 of field "x"` — the command form (opcode 0x18) of
     /// `chunk.hilite()`: selects the chunk's characters in the field so the
     /// renderer paints the selection band. The stack holds the eight chunk
@@ -519,7 +559,7 @@ impl StringBytecodeHandler {
                 var_type,
                 ctx,
             )?;
-            let chunk_expr = Self::read_single_chunk_ref(player, ctx)?;
+            let chunks = Self::read_all_chunks(player, ctx)?;
 
             // Strings are value types in Director: `delete char 1 to n of tStr`
             // ASSIGNS a new value to the variable, it does not edit a shared
@@ -556,7 +596,7 @@ impl StringBytecodeHandler {
                     current_datum, player,
                 ),
             };
-            let new_string = StringChunkUtils::string_by_deleting_chunk(&current, &chunk_expr)?;
+            let new_string = Self::delete_nested_chunk(&current, &chunks)?;
             let new_string_ref = player.alloc_datum(Datum::String(new_string));
             player_set_context_var(
                 player,
@@ -607,8 +647,9 @@ impl StringBytecodeHandler {
             // Read the target variable (top of stack: cast_id if field type, then id)
             let (id_ref, cast_id_ref) = read_context_var_args(player, var_type, ctx.scope_ref);
 
-            // Read the chunk expression from the stack (8 values: last_line..first_char)
-            let chunk_expr = Self::read_single_chunk_ref(player, ctx)?;
+            // Read the chunk expression from the stack (8 values: last_line..first_char).
+            // Several ranges at once is a nested chunk, `word 3 of line 2`.
+            let chunks = Self::read_all_chunks(player, ctx)?;
 
             // Pop the value to put from the stack (pushed before chunk params)
             let value_ref = {
@@ -644,17 +685,7 @@ impl StringBytecodeHandler {
             let value_string = player.get_datum(&value_ref).string_value()?;
 
             // Apply the chunk operation based on put type
-            let new_string = match put_type {
-                PutType::Into => {
-                    StringChunkUtils::string_by_putting_into_chunk(&current_string, &chunk_expr, &value_string)?
-                }
-                PutType::Before => {
-                    StringChunkUtils::string_by_putting_before_chunk(&current_string, &chunk_expr, &value_string)?
-                }
-                PutType::After => {
-                    StringChunkUtils::string_by_putting_after_chunk(&current_string, &chunk_expr, &value_string)?
-                }
-            };
+            let new_string = Self::put_into_nested_chunk(&current_string, &chunks, &put_type, &value_string)?;
 
             let new_string_ref = player.alloc_datum(Datum::String(new_string));
             // The chunk operation already built the complete result string,
