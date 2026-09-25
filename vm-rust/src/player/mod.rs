@@ -2985,6 +2985,10 @@ impl DirPlayer {
                 let val = compute_mouse_line(self);
                 Ok(self.alloc_datum(Datum::Int(val)))
             },
+            BuiltInSymbol::MouseWord => {
+                let val = compute_mouse_word(self);
+                Ok(self.alloc_datum(Datum::Int(val)))
+            },
             BuiltInSymbol::StillDown => { self.input_polled = true; Ok(self.alloc_datum(datum_bool(self.movie.mouse_down))) },
             BuiltInSymbol::Rollover => {
                 let sprite = get_sprite_at(self, self.mouse_loc.0, self.mouse_loc.1, false);
@@ -3431,6 +3435,10 @@ impl DirPlayer {
             }
             Some(BuiltInSymbol::MouseLine) => {
                 let val = compute_mouse_line(self);
+                Ok(self.alloc_datum(Datum::Int(val)))
+            }
+            Some(BuiltInSymbol::MouseWord) => {
+                let val = compute_mouse_word(self);
                 Ok(self.alloc_datum(Datum::Int(val)))
             }
             Some(BuiltInSymbol::MouseDown) => { self.input_polled = true; Ok(self.alloc_datum(datum_bool(self.movie.mouse_down))) }
@@ -6543,6 +6551,55 @@ fn mouse_member_datum(player: &DirPlayer) -> Datum {
         },
         None => Datum::Void,
     }
+}
+
+/// `the mouseWord`: the 1-based number of the word under the pointer in a
+/// field or text sprite, or -1 when the pointer isn't over a word (between
+/// words, past the text, or over a non-text sprite). Words are Lingo words:
+/// runs of characters separated by spaces, tabs and line breaks.
+fn compute_mouse_word(player: &mut DirPlayer) -> i32 {
+    let (mx, my) = player.mouse_loc;
+    let sprite_num = match score::get_sprite_at(player, mx, my, false) {
+        Some(n) => n as i16,
+        None => return -1,
+    };
+    let char_idx = compute_char_at(player, sprite_num, mx, my);
+    if char_idx < 1 {
+        return -1;
+    }
+    let text = match player
+        .movie
+        .score
+        .get_sprite(sprite_num)
+        .and_then(|s| s.member.as_ref())
+        .and_then(|r| player.movie.cast_manager.find_member_by_ref(r))
+        .map(|m| &m.member_type)
+    {
+        Some(CastMemberType::Field(f)) => f.text.clone(),
+        Some(CastMemberType::Text(t)) => t.text.clone(),
+        _ => return -1,
+    };
+    word_number_at_char(&text, char_idx as usize)
+}
+
+/// 1-based word number containing the 1-based character `char_idx`, or -1 if
+/// that character is whitespace or out of range.
+fn word_number_at_char(text: &str, char_idx: usize) -> i32 {
+    let is_space = |c: char| c == ' ' || c == '\t' || c == '\r' || c == '\n';
+    let mut word = 0;
+    let mut in_word = false;
+    for (i, c) in text.chars().enumerate() {
+        if is_space(c) {
+            in_word = false;
+        } else if !in_word {
+            in_word = true;
+            word += 1;
+        }
+        if i + 1 == char_idx {
+            return if is_space(c) { -1 } else { word };
+        }
+    }
+    -1
 }
 
 fn compute_mouse_char(player: &mut DirPlayer) -> i32 {

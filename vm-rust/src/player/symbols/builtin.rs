@@ -178,6 +178,7 @@ define_builtin_symbols! {
     "mouseH" => MouseH,
     "mouseV" => MouseV,
     "mouseChar" => MouseChar,
+    "mouseWord" => MouseWord,
     "mouseMember" => MouseMember,
     "stillDown" => StillDown,
     "rollover" => Rollover,
