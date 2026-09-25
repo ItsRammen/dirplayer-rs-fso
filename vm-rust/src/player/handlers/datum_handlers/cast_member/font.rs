@@ -1423,7 +1423,18 @@ impl FontMemberHandlers {
                     let left = start_x + cx.round() as i32;
                     let top = start_y + line_top_y.round() as i32;
                     let bottom = top + line_h.round() as i32;
-                    bitmap.fill_rect(left, top, left + 1, bottom, (0, 0, 0), &palette_map, 1.0);
+                    // In the text colour, as Director draws it: a black caret
+                    // disappears in light-on-dark fields. Glyphs take their
+                    // colour from the styled segment under them, so use the
+                    // segment at the caret (or the first one on an empty spot).
+                    let (fx, fy) = (left as f64, (top + bottom) as f64 / 2.0);
+                    let caret_color = seg_color_rects
+                        .iter()
+                        .find(|&&(x0, x1, yt, yb, _)| fx >= x0 - 1.0 && fx <= x1 + 1.0 && fy >= yt && fy < yb)
+                        .or_else(|| seg_color_rects.first())
+                        .map(|&(_, _, _, _, c)| c)
+                        .unwrap_or(fallback_color);
+                    bitmap.fill_rect(left, top, left + 1, bottom, caret_color, &palette_map, 1.0);
                 }
             }
         }

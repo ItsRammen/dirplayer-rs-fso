@@ -7619,7 +7619,17 @@ impl WebGL2Renderer {
                     cache_key.sel_end,
                 );
                 let cy = top_spacing as i32 + dy;
-                text_bitmap.fill_rect(dx, cy, dx + 1, cy + font.char_height as i32, (0, 0, 0), &palettes, 1.0);
+                // Draw the caret in the text colour, as Director does. A fixed
+                // black caret vanishes in light-on-dark fields such as ROTL's
+                // login boxes (white text, background-transparent ink over a
+                // black stage).
+                let caret_rgb = resolve_color_ref(
+                    &palettes,
+                    fg_color,
+                    &PaletteRef::BuiltIn(get_system_default_palette()),
+                    8,
+                );
+                text_bitmap.fill_rect(dx, cy, dx + 1, cy + font.char_height as i32, caret_rgb, &palettes, 1.0);
             }
         }
 
