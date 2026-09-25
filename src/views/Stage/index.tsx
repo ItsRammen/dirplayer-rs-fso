@@ -188,6 +188,27 @@ function PanIcon() {
   );
 }
 
+
+// The JS keyCode a typed character would carry, for characters that arrive
+// through the hidden input (onInput) rather than a keydown. Letters and digits
+// use their upper-case char code (the keyCode convention: 'a' -> 65), which the
+// keyboard map turns into Director key codes. Punctuation must NOT: its char
+// code collides with a keyCode of a different key -- "'" is 39, ArrowRight's
+// keyCode, so typing an apostrophe in chat read as keyPressed(124) and walked
+// the character right; '%' '&' '(' and '.' likewise read as Left, Up, Down and
+// Delete. Punctuation gets its real US-layout keyCode; anything else gets 229
+// (the browser's "processing" keyCode), which maps to no key.
+const PUNCTUATION_KEY_CODES: Record<string, number> = {
+  ' ': 32, '`': 192, '~': 192, '-': 189, '_': 189, '=': 187, '+': 187,
+  '[': 219, '{': 219, ']': 221, '}': 221, '\\': 220, '|': 220, ';': 186, ':': 186,
+  "'": 222, '"': 222, ',': 188, '<': 188, '.': 190, '>': 190, '/': 191, '?': 191,
+  '!': 49, '@': 50, '#': 51, '$': 52, '%': 53, '^': 54, '&': 55, '*': 56, '(': 57, ')': 48,
+};
+function jsKeyCodeForChar(ch: string): number {
+  if (/^[a-z0-9]$/i.test(ch)) return ch.toUpperCase().charCodeAt(0);
+  return PUNCTUATION_KEY_CODES[ch] ?? 229;
+}
+
 export default function Stage({ showControls, enableGestures }: { showControls?: boolean; enableGestures?: boolean }) {
   const [outerMeasureRef, { width: outerWidth, height: outerHeight }] = useMeasure();
   const [stageMeasureRef, { width: stageWidth, height: stageHeight }] = useMeasure();
@@ -921,11 +942,9 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
           const input = e.currentTarget;
           const value = input.value;
           if (value) {
-            // Use toUpperCase().charCodeAt(0) to match JS keyCode convention
-            // (e.g. 'a' → 65 not 97) so the keyboard_map maps correctly.
             const chars = value.split('');
             for (let i = 0; i < chars.length; i++) {
-              key_down(chars[i], chars[i].toUpperCase().charCodeAt(0));
+              key_down(chars[i], jsKeyCodeForChar(chars[i]));
             }
             input.value = '';
             // Defer key_up so the async keyDown command handler can read
@@ -933,7 +952,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
             // key_down() sets state immediately but the handler runs async.
             setTimeout(() => {
               for (let i = 0; i < chars.length; i++) {
-                key_up(chars[i], chars[i].toUpperCase().charCodeAt(0));
+                key_up(chars[i], jsKeyCodeForChar(chars[i]));
               }
             }, 100);
           }
