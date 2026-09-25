@@ -4186,6 +4186,16 @@ fn resolve_sprite_member_assignment(
                     let (l, t, r, b) = flash.effective_rect();
                     Some(((r - l) as i32, (b - t) as i32))
                 }
+                // Fields and text size a sprite to their box, like any other
+                // member. Without this a pooled puppet channel switched from a
+                // bitmap to a field kept the bitmap's size — ROTL reuses channels
+                // 318-392 for every overlay, and its profile and item-description
+                // fields came out 0px wide with no visible text.
+                CastMemberType::Field(f) => {
+                    let rect_h = (f.rect_bottom as i32 - f.rect_top as i32).max(0);
+                    Some((f.width as i32, (f.height as i32).max(rect_h)))
+                }
+                CastMemberType::Text(t) => Some((t.width as i32, t.height as i32)),
                 _ => None,
             };
             let is_film_loop = matches!(&m.member_type, CastMemberType::FilmLoop(_));
