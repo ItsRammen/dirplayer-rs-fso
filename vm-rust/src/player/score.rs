@@ -5418,6 +5418,16 @@ pub fn concrete_sprite_hit_test(player: &DirPlayer, sprite: &Sprite, x: i32, y: 
     if !sprite.visible || !sprite.member.is_some() {
         return false;
     }
+    // A sprite whose member slot is empty has nothing to click, and Director
+    // lets the click through to what lies underneath. ROTL's title-screen
+    // clouds switch to an empty member on the login and character screens
+    // but keep their stage-wide rects; hit-testing them swallowed every click
+    // aimed at the name and password fields.
+    if let Some(member_ref) = sprite.member.as_ref() {
+        if player.movie.cast_manager.find_member_by_ref(member_ref).is_none() {
+            return false;
+        }
+    }
     let rect = get_concrete_sprite_rect(player, sprite);
 
     // Don't test collision for sprites positioned far off-screen
