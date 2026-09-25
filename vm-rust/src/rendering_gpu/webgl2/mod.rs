@@ -3155,7 +3155,13 @@ impl WebGL2Renderer {
                     // time scrollTop changes. Force keep_authored_height so
                     // the bitmap stays at sprite height instead of shrinking
                     // to fit the scrolled-up content.
-                    let scroll_top_i = field_member.scroll_top as i32;
+                    // Director keeps scrollTop within the text: a field whose
+                    // saved scroll is past the end of new, shorter text shows
+                    // from the top rather than scrolled into empty space.
+                    let scroll_top_i = match &scrollbar_info {
+                        Some((sb, _)) => (field_member.scroll_top as i32).clamp(0, sb.max_scroll.max(0)),
+                        None => field_member.scroll_top as i32,
+                    };
                     // Director insets field text by the border plus the
                     // margin ("gutter"); FieldInfo counts both in the member
                     // height, but the text was drawn flush with the top, so

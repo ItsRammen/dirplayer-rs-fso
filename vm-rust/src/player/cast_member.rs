@@ -589,7 +589,12 @@ impl FieldMember {
             max_height: field_info.max_height,
             fixed_line_space: 0,  // Use default line spacing for text rendering
             auto_line_space: false,
-            top_spacing: field_info.scroll as i16,
+            // Bytes 12-13 are the saved scroll position, which is `scrollTop`
+            // below — not spacing. Used as both, the text sat `scroll` px
+            // lower whenever scrollTop moved off its saved value (ROTL's
+            // profile quest list, saved scrolled, drew its lines at the
+            // bottom of the box and scrolled into empty space).
+            top_spacing: 0,
             box_type: field_info.box_type(),
             anti_alias: false,
             width: field_info.width(),  // Calculated from rect
