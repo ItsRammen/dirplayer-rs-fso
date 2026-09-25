@@ -455,10 +455,9 @@ impl Bitmap {
                     self.data[index] = result_index;
                 }
                 16 => {
-                    let r = r as f32 * 31.0 / 255.0;
-                    let g = g as f32 * 63.0 / 255.0;
-                    let b = b as f32 * 31.0 / 255.0;
-                    let value = Rgb565::pack_565((r as u8, g as u8, b as u8));
+                    // Drop the low bits, as Director does, so a colour written to
+                    // a 16-bit image reads back unchanged (see get_pixel_color_ref).
+                    let value = Rgb565::pack_565((r >> 3, g >> 2, b >> 3));
                     let bytes = value.to_le_bytes();
                     self.data[index] = bytes[0];
                     self.data[index + 1] = bytes[1];
@@ -567,10 +566,9 @@ impl Bitmap {
                 self.data[index] = result_index;
             }
             16 => {
-                let r = r as f32 * 31.0 / 255.0;
-                let g = g as f32 * 63.0 / 255.0;
-                let b = b as f32 * 31.0 / 255.0;
-                let value = Rgb565::pack_565((r as u8, g as u8, b as u8));
+                // Drop the low bits, as Director does, so a colour written to
+                // a 16-bit image reads back unchanged (see get_pixel_color_ref).
+                let value = Rgb565::pack_565((r >> 3, g >> 2, b >> 3));
                 let bytes = value.to_le_bytes();
                 let index = (y * self.width as usize + x) * 2;
                 self.data[index] = bytes[0];
@@ -632,9 +630,14 @@ impl Bitmap {
                 let index = (y * self.width as usize + x) * 2;
                 let value = u16::from_le_bytes([self.data[index], self.data[index + 1]]);
                 let (red, green, blue) = Rgb565::unpack_565(value);
-                let red = (red as f32 / 31.0 * 255.0) as u8;
-                let green = (green as f32 / 63.0 * 255.0) as u8;
-                let blue = (blue as f32 / 31.0 * 255.0) as u8;
+                // Bit replication: the exact inverse of the truncating pack in
+                // set_pixel, so rgb(49, 231, 33) survives a round trip. Scaling
+                // with truncation turned it into rgb(41, 230, 32), and a
+                // background-transparent ink keyed on the original colour then
+                // matched nothing (ROTL's map layers drew as solid green).
+                let red = (red << 3) | (red >> 2);
+                let green = (green << 2) | (green >> 4);
+                let blue = (blue << 3) | (blue >> 2);
                 ColorRef::Rgb(red, green, blue)
             }
             32 => {
