@@ -259,7 +259,7 @@ impl FieldMemberHandlers {
             "wordWrap" => Ok(datum_bool(field.word_wrap)),
             // `the fixedLineSpace` is the raw fixed line-spacing override
             // (0 = "use the font's natural line height").
-            "fixedLineSpace" => Ok(Datum::Int(field.fixed_line_space as i32)),
+            "fixedLineSpace" => Ok(Datum::Int(if field.auto_line_space { 0 } else { field.fixed_line_space as i32 })),
             // `the lineHeight` is the ACTUAL rendered line height: the fixed
             // override when set, otherwise derived from the font/size. A
             // runtime `new(#field)` has fixedLineSpace = 0, so returning the
@@ -733,6 +733,9 @@ impl FieldMemberHandlers {
                     let font_size = value? as u16;
                     let field = cast_member.member_type.as_field_mut().unwrap();
                     field.font_size = font_size;
+                    if field.auto_line_space && font_size > 0 {
+                        field.fixed_line_space = crate::player::cast_member::FieldMember::natural_line_space(font_size);
+                    }
                     Ok(())
                 },
             ),
@@ -760,11 +763,9 @@ impl FieldMemberHandlers {
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
-                    cast_member
-                        .member_type
-                        .as_field_mut()
-                        .unwrap()
-                        .fixed_line_space = value? as u16;
+                    let field = cast_member.member_type.as_field_mut().unwrap();
+                    field.fixed_line_space = value? as u16;
+                    field.auto_line_space = false;
                     Ok(())
                 },
             ),

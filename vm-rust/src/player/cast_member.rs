@@ -71,6 +71,10 @@ pub struct FieldMember {
     /// coincide (156/156), which is why only one of the two ever looked wrong.
     pub max_height: u16,
     pub fixed_line_space: u16,  // Line spacing for text rendering
+    /// `fixed_line_space` was filled in with the natural line height (see
+    /// `natural_line_space`) rather than authored, so a `fontSize` change
+    /// recomputes it and `the fixedLineSpace` still reads 0.
+    pub auto_line_space: bool,
     pub top_spacing: i16,
     pub box_type: BuiltInSymbol,
     pub anti_alias: bool,
@@ -287,6 +291,12 @@ fn ensure_run_boundary(
 }
 
 impl FieldMember {
+    /// Director's line pitch for a field with no authored line height: the
+    /// font size at the Windows 96 DPI (points x 4/3), so Arial 12 steps 16px.
+    pub fn natural_line_space(font_size: u16) -> u16 {
+        ((font_size as u32 * 4 + 1) / 3) as u16
+    }
+
     pub fn new() -> FieldMember {
         FieldMember {
             text: "".to_string(),
@@ -300,6 +310,7 @@ impl FieldMember {
             text_height: 100,
             max_height: 0,
             fixed_line_space: 0,
+            auto_line_space: false,
             top_spacing: 0,
             box_type: BuiltInSymbol::Adjust,
             anti_alias: false,
@@ -419,6 +430,7 @@ impl FieldMember {
             text_height: field_info.text_height,  // Text area height for dimension calculations
             max_height: field_info.max_height,
             fixed_line_space: 0,  // Use default line spacing for text rendering
+            auto_line_space: false,
             top_spacing: field_info.scroll as i16,
             box_type: field_info.box_type(),
             anti_alias: false,
@@ -5605,6 +5617,15 @@ impl CastMember {
                         cast_lib: cast_lib as i32,
                         cast_member: number as i32, // member's own slot; attached script registered at scripts[number]
                     });
+                }
+
+                // No authored line height: use Director's natural one. ROTL's
+                // Windows-authored fields store 0 here, and Director lays their
+                // Arial 12 out on a 16px pitch (measured against the Windows
+                // projector) where the font size alone gave 12px.
+                if field_member.fixed_line_space == 0 && field_member.font_size > 0 {
+                    field_member.fixed_line_space = FieldMember::natural_line_space(field_member.font_size);
+                    field_member.auto_line_space = true;
                 }
 
                 debug!(
