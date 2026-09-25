@@ -3465,16 +3465,27 @@ impl WebGL2Renderer {
         let palettes = player.movie.cast_manager.palettes();
         // Sprite foreColor/backColor palette indices are resolved against the bitmap's palette,
         // so they work together correctly (e.g., index 248/255 in a custom 256-color palette).
+        // A 16/32-bit image has no palette of its own (a runtime `new(#bitmap)` reports
+        // #grayscale), so there the indices go through the movie's current palette, as
+        // Director does: ROTL keys its 16-bit map layers with ink 36 on backColor 83,
+        // green only in the movie's own palette.
+        let sprite_color_palette_ref = if bitmap_bit_depth > 8
+            && matches!(texture_source, TextureSource::Bitmap { .. })
+        {
+            player.movie.score.get_frame_palette(player.movie.current_frame)
+        } else {
+            bitmap_palette_ref.clone()
+        };
         let bg_color_rgb = resolve_color_ref(
             &palettes,
             &bg_color,
-            &bitmap_palette_ref,
+            &sprite_color_palette_ref,
             bitmap_bit_depth,
         );
         let fg_color_rgb = resolve_color_ref(
             &palettes,
             &fg_color,
-            &bitmap_palette_ref,
+            &sprite_color_palette_ref,
             bitmap_bit_depth,
         );
 
