@@ -208,8 +208,13 @@ pub fn player_set_context_var(
         0x6 => {
             // FIELD variable
 
-            // Get the value to write
-            let new_value = player.get_datum(value_ref).string_value()?;
+            // Get the value to write. VOID writes an empty field, as in
+            // Director, not the word "VOID": ROTL fills its login boxes from
+            // getPref(), which is VOID on a first visit.
+            let new_value = match player.get_datum(value_ref) {
+                Datum::Void => String::new(),
+                other => other.string_value()?,
+            };
 
             // Map cast_id_ref to Datum if provided
             let cast_id_opt: Option<&Datum> = cast_id_ref.map(|r| player.get_datum(r));

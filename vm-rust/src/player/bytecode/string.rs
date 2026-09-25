@@ -162,6 +162,13 @@ impl StringBytecodeHandler {
         })
     }
 
+    fn put_text(datum: &Datum) -> Result<String, ScriptError> {
+        match datum {
+            Datum::Void => Ok(String::new()),
+            other => other.string_value(),
+        }
+    }
+
     pub fn put(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
             let bytecode = player.get_ctx_current_bytecode(ctx);
@@ -191,12 +198,12 @@ impl StringBytecodeHandler {
                         var_type,
                         &ctx,
                     )?;
-                    let curr_string = player.get_datum(&curr_string_id);
-                    let curr_string = curr_string.string_value()?;
-                    let value = player.get_datum(&value_ref);
+                    // `put` joins like `&`: VOID adds nothing.
+                    let curr_string = Self::put_text(player.get_datum(&curr_string_id))?;
+                    let value = Self::put_text(player.get_datum(&value_ref))?;
 
                     let mut new_string = String::new();
-                    new_string.push_str(value.string_value()?.as_str());
+                    new_string.push_str(value.as_str());
                     new_string.push_str(curr_string.as_str());
                     let new_string = player.alloc_datum(Datum::String(new_string));
                     // Already built the complete string, use Into to replace.
@@ -218,13 +225,13 @@ impl StringBytecodeHandler {
                         var_type,
                         &ctx,
                     )?;
-                    let curr_string = player.get_datum(&curr_string_id);
-                    let curr_string = curr_string.string_value()?;
-                    let value = player.get_datum(&value_ref);
+                    // `put` joins like `&`: VOID adds nothing.
+                    let curr_string = Self::put_text(player.get_datum(&curr_string_id))?;
+                    let value = Self::put_text(player.get_datum(&value_ref))?;
 
                     let mut new_string = String::new();
                     new_string.push_str(curr_string.as_str());
-                    new_string.push_str(value.string_value()?.as_str());
+                    new_string.push_str(value.as_str());
                     let new_string = player.alloc_datum(Datum::String(new_string));
                     // Already built the complete string, use Into to replace.
                     player_set_context_var(
@@ -682,7 +689,7 @@ impl StringBytecodeHandler {
             };
 
             let current_string = player.get_datum(&string_ref).string_value()?;
-            let value_string = player.get_datum(&value_ref).string_value()?;
+            let value_string = Self::put_text(player.get_datum(&value_ref))?;
 
             // Apply the chunk operation based on put type
             let new_string = Self::put_into_nested_chunk(&current_string, &chunks, &put_type, &value_string)?;
