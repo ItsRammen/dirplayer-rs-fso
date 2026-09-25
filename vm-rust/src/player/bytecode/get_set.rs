@@ -1023,8 +1023,17 @@ impl GetSetBytecodeHandler {
                         Ok(player.alloc_datum(result))
                     }
                     None => {
-                        warn!("get cast member prop '{}': member not found", prop_name);
-                        Ok(player.alloc_datum(Datum::Void))
+                        // `the number of member "missing"` is -1 in Director:
+                        // it's the standard existence test. ROTL tells items
+                        // from hirelings with `the number of member(name &
+                        // "Hireling", 0) = -1`; VOID sent every item's info
+                        // panel down the hireling branch, which lost its image.
+                        if prop_name == Symbol::builtin(BuiltInSymbol::Number) {
+                            Ok(player.alloc_datum(Datum::Int(-1)))
+                        } else {
+                            warn!("get cast member prop '{}': member not found", prop_name);
+                            Ok(player.alloc_datum(Datum::Void))
+                        }
                     }
                 }
             } else if prop_type == 0x0a || prop_type == 0x0c {

@@ -84,7 +84,19 @@ impl MovieHandlers {
                     Datum::CastLib(n) => Some(*n as i32),
                     _ => None,
                 };
-                if let (Some(cast_num), Ok(member_num)) = (cast_num, member_name_or_num.int_value()) {
+                // Only a member NUMBER gets these slot semantics. A name that
+                // matched nothing is not "member 0": `int_value()` reads a
+                // non-numeric string as 0, which turned `member("x", 0)` into
+                // the null member(0, 0) with number 0 instead of Director's -1.
+                // ROTL tells items from hirelings with
+                // `the number of member(name & "Hireling", 0) = -1`, so every
+                // item's info panel took the hireling branch and lost its image.
+                let member_num = match member_name_or_num {
+                    Datum::Int(n) => Ok(*n),
+                    Datum::Float(f) => Ok(*f as i32),
+                    _ => Err(()),
+                };
+                if let (Some(cast_num), Ok(member_num)) = (cast_num, member_num) {
                     if member_num > 0 {
                         Ok(player.alloc_datum(Datum::CastMember(CastMemberRef {
                             cast_lib: cast_num,
