@@ -414,8 +414,13 @@ impl MultiuserXtraManager {
                     let mut multiusr_manager =
                         unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                     if let Some(instance) = multiusr_manager.instances.get_mut(&instance_id) {
+                        // Report a dropped connection the way the Director Xtra
+                        // does: an error that getNetErrorString describes as
+                        // "There is no current connection". The WebSocket close
+                        // code (1000/1006) meant nothing to movies — ROTL keys its
+                        // "You have lost your connection" handling on that text.
                         instance.dispatch_message(MultiuserMessage {
-                            error_code: e.code() as i32,
+                            error_code: -5,
                             recipients: vec![],
                             sender_id: "System".to_string(),
                             subject: "DisconnectFromServer".to_string(),
@@ -672,7 +677,7 @@ impl MultiuserXtraManager {
                     -2 => "Connection refused",
                     -3 => "Connection timed out",
                     -4 => "Invalid message",
-                    -5 => "Not connected",
+                    -5 => "There is no current connection.",
                     _ => "Unknown error",
                 };
                 reserve_player_mut(|player| {
