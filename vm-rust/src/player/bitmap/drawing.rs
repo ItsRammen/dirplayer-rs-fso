@@ -787,6 +787,42 @@ impl Bitmap {
         }
     }
 
+    /// A `#rect` outline `thickness` pixels wide, drawn inward from the
+    /// rect's edge as Director's pen does: a pen as wide as the rect fills it.
+    /// ROTL clears its 800x448 shadow buffer with
+    /// `draw(0, 0, 800, 448, [#shapeType: #rect, #lineSize: 800, ...])`, and
+    /// erases single 32px tiles with a 32px pen.
+    pub fn stroke_rect_thick(
+        &mut self,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        color: (u8, u8, u8),
+        palettes: &PaletteMap,
+        alpha: f32,
+        thickness: i32,
+    ) {
+        if thickness <= 1 {
+            return self.stroke_rect(x1, y1, x2, y2, color, palettes, alpha);
+        }
+        let t = thickness;
+        for y in y1.max(0)..y2.min(self.height as i32) {
+            let on_band_row = y < y1 + t || y >= y2 - t;
+            for x in x1.max(0)..x2.min(self.width as i32) {
+                if !(on_band_row || x < x1 + t || x >= x2 - t) {
+                    continue;
+                }
+                let blended = if alpha >= 1.0 {
+                    color
+                } else {
+                    blend_color_alpha(self.get_pixel_color(palettes, x as u16, y as u16), color, alpha)
+                };
+                self.set_pixel(x, y, blended, palettes);
+            }
+        }
+    }
+
     pub fn clear_rect(
         &mut self,
         x1: i32,
