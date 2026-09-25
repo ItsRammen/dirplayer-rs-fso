@@ -4153,12 +4153,15 @@ where
 fn resolve_sprite_member_assignment(
     player: &DirPlayer,
     value: &Datum,
-) -> Result<(Option<CastMemberRef>, Option<(i32, i32)>, bool), ScriptError> {
+) -> Result<(Option<CastMemberRef>, Option<(i32, i32)>, bool, bool), ScriptError> {
+    let mut unresolved_name = false;
     let mem_ref = if let Datum::CastMember(cast_member) = value {
         Some(cast_member.clone())
     } else if value.is_string() {
         let name = value.string_value()?;
-        player.movie.cast_manager.find_member_ref_by_name(&name)
+        let found = player.movie.cast_manager.find_member_ref_by_name(&name);
+        unresolved_name = found.is_none() && !name.is_empty();
+        found
     } else if value.is_number() {
         player
             .movie
@@ -4203,7 +4206,7 @@ fn resolve_sprite_member_assignment(
         })
         .unwrap_or((None, false));
 
-    Ok((mem_ref, intrinsic_size, is_film_loop))
+    Ok((mem_ref, intrinsic_size, is_film_loop, unresolved_name))
 }
 
 fn sprite_set_prop_is_noop(
@@ -4322,7 +4325,7 @@ fn sprite_set_prop_is_noop(
                 )
             }
             Some(BuiltInSymbol::Member) => {
-                let (mem_ref, _, _) = resolve_sprite_member_assignment(player, value)?;
+                let (mem_ref, _, _, _) = resolve_sprite_member_assignment(player, value)?;
                 Ok(sprite.member == mem_ref)
             }
             Some(BuiltInSymbol::MemberNum) => {
@@ -4842,7 +4845,16 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             sprite_id,
             |player| resolve_sprite_member_assignment(player, &value),
             |sprite, value| {
-                let (mem_ref, intrinsic_size, is_film_loop) = value?;
+                let (mem_ref, intrinsic_size, is_film_loop, unresolved_name) = value?;
+
+                // A member NAME that matches nothing leaves the sprite as it
+                // is rather than blanking it. ROTL's mob animation names each
+                // frame (`Wolf-F3-S`), and wolves ship no F3 frames: clearing
+                // the member made a wolf vanish mid-fight until its next move
+                // named a frame that exists, where Director kept drawing it.
+                if unresolved_name {
+                    return Ok(());
+                }
 
                 // Detect whether the member actually changed
                 let member_changed = sprite.member != mem_ref;
