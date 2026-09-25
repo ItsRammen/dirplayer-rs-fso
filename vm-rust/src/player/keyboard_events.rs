@@ -351,7 +351,8 @@ fn native_xy_to_caret_index(
         .ok()?;
     let ctx: web_sys::CanvasRenderingContext2d =
         canvas.get_context("2d").ok()??.dyn_into().ok()?;
-    ctx.set_font(&format!("{}px {}", font_size, font));
+    // Same face + fallback as the native text renderer draws with.
+    ctx.set_font(&format!("{}px \"{}\", Arial, sans-serif", font_size, font.replace('"', "")));
 
     let lines: Vec<&str> = text.split('\r').collect();
     let line_idx = if line_h > 0 { (local_y.max(0) / line_h) as usize } else { 0 };

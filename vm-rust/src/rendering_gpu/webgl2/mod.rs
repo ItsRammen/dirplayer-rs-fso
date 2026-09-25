@@ -3152,7 +3152,13 @@ impl WebGL2Renderer {
                     // the bitmap stays at sprite height instead of shrinking
                     // to fit the scrolled-up content.
                     let scroll_top_i = field_member.scroll_top as i32;
-                    let effective_top_spacing = (field_member.top_spacing as i32 - scroll_top_i)
+                    // Director insets field text by the border plus the
+                    // margin ("gutter"); FieldInfo counts both in the member
+                    // height, but the text was drawn flush with the top, so
+                    // ROTL's 16px login boxes showed their text riding up
+                    // over the box edge.
+                    let text_inset = field_member.border as i32 + field_member.margin as i32;
+                    let effective_top_spacing = (field_member.top_spacing as i32 - scroll_top_i + text_inset)
                         .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
                     let scroll_active = scroll_top_i != 0;
 

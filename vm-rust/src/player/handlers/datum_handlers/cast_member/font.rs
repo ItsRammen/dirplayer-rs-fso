@@ -767,7 +767,10 @@ impl FontMemberHandlers {
                 font_parts.push("italic".to_string());
             }
             font_parts.push(format!("{}px", size_px as i32));
-            font_parts.push(font_face);
+            // A face the browser doesn't have falls back like Windows does, to
+            // a sans-serif (Arial), not the browser's serif default: ROTL's
+            // password box asks for "KNO Font", which isn't in the movie.
+            font_parts.push(format!("\"{}\", Arial, sans-serif", font_face.replace('"', "")));
 
             let color = if let Some(c) = style.color {
                 (((c >> 16) & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, (c & 0xFF) as u8)
@@ -1428,11 +1431,18 @@ impl FontMemberHandlers {
                     // colour from the styled segment under them, so use the
                     // segment at the caret (or the first one on an empty spot).
                     let (fx, fy) = (left as f64, (top + bottom) as f64 / 2.0);
+                    // An empty field has no segments; its caret still takes
+                    // the text colour the spans carry (the white chat bar
+                    // drew a black, invisible caret until something was typed).
+                    let span_text_color = spans.iter().find_map(|s| s.style.color).map(|c| {
+                        (((c >> 16) & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, (c & 0xFF) as u8)
+                    });
                     let caret_color = seg_color_rects
                         .iter()
                         .find(|&&(x0, x1, yt, yb, _)| fx >= x0 - 1.0 && fx <= x1 + 1.0 && fy >= yt && fy < yb)
                         .or_else(|| seg_color_rects.first())
                         .map(|&(_, _, _, _, c)| c)
+                        .or(span_text_color)
                         .unwrap_or(fallback_color);
                     bitmap.fill_rect(left, top, left + 1, bottom, caret_color, &palette_map, 1.0);
                 }

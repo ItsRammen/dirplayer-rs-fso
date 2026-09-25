@@ -474,6 +474,92 @@ impl FieldMemberHandlers {
                     "rect" => Ok(Datum::Rect([0.0, 0.0, width as f64, height as f64], 0)),
                     "height" => Ok(Datum::Int(height as i32)),
                     "picture" => {
+                        // A field in a system font (no embedded font member of
+                        // that name) is drawn on stage by the browser's text
+                        // renderer. Its picture must be too: the bitmap-font
+                        // fallback below is a tiny pixel face that ignores
+                        // bold, size and alignment. ROTL renders its hireling
+                        // panel this way (Arial bold 12 HP/MP, 10 name/level,
+                        // right-aligned MP and level) and every label came out
+                        // in the pixel face.
+                        let font_lc = font_name.to_ascii_lowercase();
+                        let font_canon = crate::player::font::FontManager::canonical_font_name(&font_name);
+                        let has_font_member = player.movie.cast_manager.casts.iter().any(|cast| {
+                            cast.members.values().any(|m| match &m.member_type {
+                                crate::player::cast_member::CastMemberType::Font(f) => {
+                                    f.font_info.name.to_ascii_lowercase() == font_lc
+                                        || m.name.to_ascii_lowercase() == font_lc
+                                        || (!font_canon.is_empty()
+                                            && crate::player::font::FontManager::canonical_font_name(&m.name) == font_canon)
+                                }
+                                _ => false,
+                            })
+                        });
+                        if !font_name.is_empty() && !has_font_member {
+                            use crate::player::handlers::datum_handlers::cast_member::font::{FontMemberHandlers, HtmlStyle, StyledSpan};
+                            let (r, g, b) = {
+                                let palettes = player.movie.cast_manager.palettes();
+                                crate::player::bitmap::bitmap::resolve_color_ref(
+                                    &palettes,
+                                    &fore_color,
+                                    &PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
+                                    8,
+                                )
+                            };
+                            let style_lc = field.font_style.to_ascii_lowercase();
+                            let mut style = HtmlStyle::default();
+                            style.font_face = Some(font_name.clone());
+                            style.font_size = font_size.map(|s| s as i32);
+                            style.color = Some(((r as u32) << 16) | ((g as u32) << 8) | b as u32);
+                            style.bold = style_lc.contains("bold");
+                            style.italic = style_lc.contains("italic");
+                            style.underline = style_lc.contains("underline");
+                            let spans = vec![StyledSpan { text: text_clone.clone(), style }];
+
+                            let mut bitmap = Bitmap::new(
+                                width.max(1),
+                                height.max(1),
+                                32,
+                                32,
+                                8,
+                                PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
+                            );
+                            bitmap.use_alpha = true;
+                            bitmap.data.fill(0);
+                            let rendered = FontMemberHandlers::render_native_text_to_bitmap(
+                                &mut bitmap,
+                                &spans,
+                                0,
+                                top_spacing as i32,
+                                width.max(1) as i32,
+                                height.max(1) as i32,
+                                alignment.clone().into(),
+                                width.max(1) as i32,
+                                word_wrap,
+                                None,
+                                fixed_line_space,
+                                top_spacing,
+                                0,
+                                &[],
+                                &[],
+                                &[],
+                            );
+                            if rendered.is_ok() {
+                                // Fields are not anti-aliased (Director draws
+                                // them with the OS text renderer, aliased).
+                                for px in bitmap.data.chunks_exact_mut(4) {
+                                    px[3] = if px[3] >= 128 { 255 } else { 0 };
+                                    if px[3] == 0 {
+                                        px[0] = 0;
+                                        px[1] = 0;
+                                        px[2] = 0;
+                                    }
+                                }
+                                let bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(bitmap);
+                                return Ok(Datum::BitmapRef(bitmap_ref));
+                            }
+                        }
+
                         let mut bitmap = Bitmap::new(
                             width,
                             height,

@@ -2102,7 +2102,7 @@ impl BuiltInHandlerManager {
                         // word-wrap probes below.
                         let measure_ctx = {
                             use wasm_bindgen::JsCast;
-                            let font_str = format!("{}px {}", display_font_size, display_font_name);
+                            let font_str = format!("{}px \"{}\", Arial, sans-serif", display_font_size, display_font_name.replace('"', ""));
                             web_sys::window()
                                 .and_then(|w| w.document())
                                 .and_then(|d| d.create_element("canvas").ok())
@@ -3102,7 +3102,8 @@ fn count_wraps_before_index(
         .and_then(|c| c.get_context("2d").ok().flatten())
         .and_then(|c| c.dyn_into::<web_sys::CanvasRenderingContext2d>().ok());
     let Some(ctx) = ctx_opt else { return 0; };
-    ctx.set_font(&format!("{}px {}", font_size, font_name));
+    // Same face + fallback as the native text renderer draws with.
+    ctx.set_font(&format!("{}px \"{}\", Arial, sans-serif", font_size, font_name.replace('"', "")));
     // Walk source lines; for each line, simulate word-wrap and count
     // breaks that occur at char positions < target_char_idx.
     let normalised: String = text.replace("\r\n", "\n").replace('\r', "\n");
