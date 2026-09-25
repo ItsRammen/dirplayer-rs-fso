@@ -868,10 +868,24 @@ impl FieldMemberHandlers {
             ),
             "foreColor" => borrow_member_mut(
                 member_ref,
-                |player| value.int_value(),
+                |player| {
+                    // Resolved like the renderer resolves field text colour.
+                    value.int_value().map(|v| {
+                        let palettes = player.movie.cast_manager.palettes();
+                        let rgb = crate::player::bitmap::bitmap::resolve_color_ref(
+                            &palettes,
+                            &ColorRef::PaletteIndex(v as u8),
+                            &PaletteRef::BuiltIn(crate::player::bitmap::bitmap::get_system_default_palette()),
+                            8,
+                        );
+                        (v, rgb)
+                    })
+                },
                 |cast_member, value| {
-                    let v = value? as u8;
-                    cast_member.member_type.as_field_mut().unwrap().fore_color = Some(ColorRef::PaletteIndex(v));
+                    let (v, rgb) = value?;
+                    let field = cast_member.member_type.as_field_mut().unwrap();
+                    field.fore_color = Some(ColorRef::PaletteIndex(v as u8));
+                    field.set_all_run_colors(rgb);
                     Ok(())
                 },
             ),

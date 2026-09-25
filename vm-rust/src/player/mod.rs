@@ -6644,7 +6644,7 @@ pub fn compute_char_at(player: &mut DirPlayer, sprite_num: i16, mx: i32, my: i32
                 f.text.clone(), f.fixed_line_space, f.top_spacing,
                 f.width as i32, f.scroll_top as i32, f.word_wrap,
                 f.font.clone(), f.font_size,
-                f.formatting_runs.clone(), false,
+                f.current_runs().into_owned(), false,
             ),
             CastMemberType::Text(t) => (
                 t.text.clone(), t.fixed_line_space, t.top_spacing,

@@ -2928,8 +2928,10 @@ impl WebGL2Renderer {
                         .get_cast(member_ref.cast_lib as u32)
                         .map(|cl| cl.font_table.clone())
                         .unwrap_or_default();
+                    // Runs re-aligned to the text as scripts have edited it.
+                    let field_runs = field_member.current_runs();
                     let field_styled_spans: Option<Vec<crate::player::handlers::datum_handlers::cast_member::font::StyledSpan>>
-                        = if field_member.formatting_runs.len() >= 2 {
+                        = if field_runs.len() >= 2 {
                         use crate::player::handlers::datum_handlers::cast_member::font::{StyledSpan, HtmlStyle};
                         let text_str = &field_member.text;
                         // STXT formatting_runs use BYTE positions in
@@ -2954,7 +2956,7 @@ impl WebGL2Renderer {
                             0
                         };
                         let mut spans: Vec<StyledSpan> = Vec::new();
-                        let runs = &field_member.formatting_runs;
+                        let runs: &[_] = &field_runs;
                         // Detect whether the runs actually carry non-trivial
                         // per-run sizes (≥6pt and at least one differing from
                         // the member default). Director STXT runs that just
@@ -3196,6 +3198,12 @@ impl WebGL2Renderer {
                     );
                     cache_key.keep_authored_height = transform_active || scroll_active || box_clipped;
                     cache_key.transform_active = transform_active;
+                    // Per-run colour/style changes alone (same text) must
+                    // re-rasterize too.
+                    cache_key.styled_spans_hash = field_styled_spans
+                        .as_deref()
+                        .map(RenderedTextCacheKey::hash_styled_spans)
+                        .unwrap_or(0);
 
                     TextureSource::RenderedText {
                         cache_key,

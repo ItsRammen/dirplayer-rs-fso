@@ -289,6 +289,24 @@ impl RenderedTextCacheKey {
     }
 
     /// Create a new cache key with focus state (for Field members with cursor)
+    /// Hash of the spans' text and style, for the cache key.
+    pub fn hash_styled_spans(spans: &[crate::player::handlers::datum_handlers::cast_member::font::StyledSpan]) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut span_hasher = DefaultHasher::new();
+        for span in spans {
+            span.text.hash(&mut span_hasher);
+            span.style.font_face.hash(&mut span_hasher);
+            span.style.font_size.hash(&mut span_hasher);
+            span.style.color.hash(&mut span_hasher);
+            span.style.bg_color.hash(&mut span_hasher);
+            span.style.bold.hash(&mut span_hasher);
+            span.style.italic.hash(&mut span_hasher);
+            span.style.underline.hash(&mut span_hasher);
+        }
+        span_hasher.finish()
+    }
+
     pub fn new_with_focus(
         member_ref: CastMemberRef,
         text: &str,
@@ -365,23 +383,7 @@ impl RenderedTextCacheKey {
         let text_hash = hasher.finish();
 
         // Hash styled spans if present
-        let styled_spans_hash = if let Some(spans) = styled_spans {
-            let mut span_hasher = DefaultHasher::new();
-            for span in spans {
-                span.text.hash(&mut span_hasher);
-                // Hash style properties
-                span.style.font_face.hash(&mut span_hasher);
-                span.style.font_size.hash(&mut span_hasher);
-                span.style.color.hash(&mut span_hasher);
-                span.style.bg_color.hash(&mut span_hasher);
-                span.style.bold.hash(&mut span_hasher);
-                span.style.italic.hash(&mut span_hasher);
-                span.style.underline.hash(&mut span_hasher);
-            }
-            span_hasher.finish()
-        } else {
-            0
-        };
+        let styled_spans_hash = styled_spans.map(Self::hash_styled_spans).unwrap_or(0);
 
         // Hash alignment, word_wrap, and font settings
         let mut settings_hasher = DefaultHasher::new();
