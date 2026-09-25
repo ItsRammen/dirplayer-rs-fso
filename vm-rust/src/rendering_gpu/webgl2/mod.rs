@@ -2889,9 +2889,13 @@ impl WebGL2Renderer {
                     // lists hilite the clicked line) whether or not it has
                     // focus. With a selection there's no caret to draw, so
                     // treating it as focused only paints the highlight.
-                    let has_focus = (field_member.editable
+                    // `the editable of sprite` counts as much as the member's
+                    // own flag (ROTL's profile bio is editable per sprite).
+                    let editable = field_member.editable
+                        || player.movie.score.get_sprite(channel_num).map_or(false, |s| s.editable);
+                    let has_focus = (editable
                         && player.keyboard_focus_sprite == channel_num)
-                        || (!field_member.editable
+                        || (!editable
                             && field_member.sel_start != field_member.sel_end);
 
                     let mut style = 0u8;

@@ -35,11 +35,28 @@ fn get_next_focus_sprite_id(player: &DirPlayer, after: i16) -> i16 {
             Some(CastMemberType::Text(t)) => t.info.as_ref().map_or(false, |i| i.editable),
             _ => false,
         };
-        if editable {
+        let is_text = matches!(member.map(|m| &m.member_type), Some(CastMemberType::Field(_)) | Some(CastMemberType::Text(_)));
+        if editable || (is_text && sprite.map_or(false, |s| s.editable)) {
             return sprite_id;
         }
     }
     -1
+}
+
+/// Whether a Field/Text sprite is editable: its member says so, or
+/// `the editable of sprite` was set. Director honours either; ROTL makes the
+/// profile bio editable only on your own profile with `sprite(323).editable`.
+pub(crate) fn sprite_text_is_editable(player: &DirPlayer, sprite_id: i16) -> bool {
+    let sprite = player.movie.score.get_sprite(sprite_id);
+    let sprite_editable = sprite.map_or(false, |s| s.editable);
+    let member = sprite
+        .and_then(|s| s.member.clone())
+        .and_then(|r| player.movie.cast_manager.find_member_by_ref(&r));
+    match member.map(|m| &m.member_type) {
+        Some(CastMemberType::Field(f)) => f.editable || sprite_editable,
+        Some(CastMemberType::Text(t)) => t.info.as_ref().map_or(false, |i| i.editable) || sprite_editable,
+        _ => false,
+    }
 }
 
 /// Whether the focused sprite's member is an editable Field or Text.
@@ -47,15 +64,7 @@ fn focused_member_is_editable(player: &DirPlayer) -> bool {
     if player.keyboard_focus_sprite < 0 {
         return false;
     }
-    let sprite = player.movie.score.get_sprite(player.keyboard_focus_sprite as i16);
-    let member = sprite
-        .and_then(|s| s.member.clone())
-        .and_then(|r| player.movie.cast_manager.find_member_by_ref(&r));
-    match member.map(|m| &m.member_type) {
-        Some(CastMemberType::Field(f)) => f.editable,
-        Some(CastMemberType::Text(t)) => t.info.as_ref().map_or(false, |i| i.editable),
-        _ => false,
-    }
+    sprite_text_is_editable(player, player.keyboard_focus_sprite as i16)
 }
 
 /// Apply a single edit/navigation key to a text + selection state. Mutates in
@@ -441,11 +450,12 @@ pub(crate) fn set_caret_at_screen(
                 top_spacing: i16,
             },
         }
+        let editable = sprite_text_is_editable(player, sprite_id);
         let snapshot = {
             let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
             let Some(member) = member else { return false };
             match &member.member_type {
-                CastMemberType::Field(f) if f.editable => MemberSnapshot::Field {
+                CastMemberType::Field(f) if editable => MemberSnapshot::Field {
                     text: f.text.clone(),
                     font: f.font.clone(),
                     font_size: f.font_size,
@@ -455,9 +465,8 @@ pub(crate) fn set_caret_at_screen(
                     top_spacing: f.top_spacing,
                     word_wrap: f.word_wrap,
                 },
-                CastMemberType::Text(t)
-                    if t.info.as_ref().map_or(false, |i| i.editable) =>
-                {
+                CastMemberType::Text(_) if editable => {
+                    let CastMemberType::Text(t) = &member.member_type else { unreachable!() };
                     MemberSnapshot::Text {
                         text: t.text.clone(),
                         font: t.font.clone(),
@@ -761,13 +770,14 @@ async fn player_key_down_inner(key: String, code: u16) -> Result<DatumRef, Scrip
                 return;
             }
 
+            let editable = sprite_text_is_editable(player, sprite_id);
             let sprite = player.movie.score.get_sprite(sprite_id);
             let member_ref = sprite.and_then(|s| s.member.clone());
             let member = member_ref.and_then(|r| player.movie.cast_manager.find_mut_member_by_ref(&r));
             let Some(member) = member else { return };
 
             match &mut member.member_type {
-                CastMemberType::Field(field) if field.editable => {
+                CastMemberType::Field(field) if editable => {
                     apply_text_edit(
                         &mut field.text,
                         &mut field.sel_start,
@@ -780,9 +790,7 @@ async fn player_key_down_inner(key: String, code: u16) -> Result<DatumRef, Scrip
                     player.text_selection_start = field.sel_start.max(0) as u16;
                     player.text_selection_end = field.sel_end.max(0) as u16;
                 }
-                CastMemberType::Text(text_member)
-                    if text_member.info.as_ref().map_or(false, |i| i.editable) =>
-                {
+                CastMemberType::Text(text_member) if editable => {
                     apply_text_edit(
                         &mut text_member.text,
                         &mut text_member.sel_start,

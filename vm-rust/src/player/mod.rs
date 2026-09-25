@@ -2948,19 +2948,20 @@ impl DirPlayer {
                 // Field/Text member, or "" if none.
                 let s = if self.keyboard_focus_sprite >= 0 {
                     let sprite_id = self.keyboard_focus_sprite as i16;
+                    let editable = crate::player::keyboard_events::sprite_text_is_editable(self, sprite_id);
                     let sprite = self.movie.score.get_sprite(sprite_id);
                     let member = sprite
                         .and_then(|s| s.member.as_ref())
                         .and_then(|m| self.movie.cast_manager.find_member_by_ref(m));
                     match member.map(|m| &m.member_type) {
-                        Some(crate::player::cast_member::CastMemberType::Field(f)) if f.editable => {
+                        Some(crate::player::cast_member::CastMemberType::Field(f)) if editable => {
                             let len = f.text.len() as i32;
                             let lo = f.sel_start.min(f.sel_end).clamp(0, len);
                             let hi = f.sel_start.max(f.sel_end).clamp(0, len);
                             f.text[lo as usize..hi as usize].to_string()
                         }
                         Some(crate::player::cast_member::CastMemberType::Text(t))
-                            if t.info.as_ref().map_or(false, |i| i.editable) =>
+                            if editable =>
                         {
                             let len = t.text.len() as i32;
                             let lo = t.sel_start.min(t.sel_end).clamp(0, len);
