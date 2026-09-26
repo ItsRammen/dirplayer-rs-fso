@@ -351,15 +351,7 @@ fn native_xy_to_caret_index(
     local_x: i32,
     local_y: i32,
 ) -> Option<i32> {
-    use wasm_bindgen::JsCast;
-    let canvas: web_sys::HtmlCanvasElement = web_sys::window()?
-        .document()?
-        .create_element("canvas")
-        .ok()?
-        .dyn_into()
-        .ok()?;
-    let ctx: web_sys::CanvasRenderingContext2d =
-        canvas.get_context("2d").ok()??.dyn_into().ok()?;
+    let ctx = super::handlers::datum_handlers::cast_member::font::native_text_measurement_context()?;
     // Same face + fallback as the native text renderer draws with.
     ctx.set_font(&format!("{}px \"{}\", Arial, sans-serif", font_size, font.replace('"', "")));
 

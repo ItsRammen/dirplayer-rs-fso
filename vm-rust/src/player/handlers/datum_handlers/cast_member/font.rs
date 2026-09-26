@@ -19,6 +19,35 @@ use std::borrow::Borrow;
 use log::debug;
 use wasm_bindgen::JsCast;
 
+// Measurement is synchronous and never calls back into Lingo. Keep one private
+// context per browser thread instead of allocating a DOM canvas for every rect,
+// rollover and scrollbar query. Firefox's cycle collector otherwise has to tear
+// down thousands of canvas observers at once (a ROTL profile captured 5.37s).
+// This context is measurement-only: rasterization has its own canvas and must
+// never resize, scale, translate or draw into this one.
+thread_local! {
+    static NATIVE_TEXT_MEASUREMENT_CONTEXT: std::cell::RefCell<Option<web_sys::CanvasRenderingContext2d>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn native_text_measurement_context() -> Option<web_sys::CanvasRenderingContext2d> {
+    NATIVE_TEXT_MEASUREMENT_CONTEXT.with(|cached| {
+        let mut cached = cached.borrow_mut();
+        if cached.is_none() {
+            let document = web_sys::window()?.document()?;
+            let canvas: web_sys::HtmlCanvasElement = document.create_element("canvas").ok()?.dyn_into().ok()?;
+            canvas.set_width(1);
+            canvas.set_height(1);
+            *cached = Some(canvas.get_context("2d").ok()??.dyn_into().ok()?);
+        }
+        let ctx = cached.as_ref()?.clone();
+        // An invalid CSS font assignment leaves the previous font in place.
+        // Preserve a fresh canvas's fallback instead of inheriting another field.
+        ctx.set_font("10px sans-serif");
+        Some(ctx)
+    })
+}
+
 // Simple HTML parser without external dependencies
 #[derive(Clone, Debug)]
 pub struct HtmlStyle {
@@ -496,31 +525,8 @@ impl FontMemberHandlers {
         bottom_spacing: i16,
         fixed_line_space: u16,
     ) -> (u16, u16) {
-        use wasm_bindgen::JsCast;
-
-        let document = match web_sys::window().and_then(|w| w.document()) {
-            Some(d) => d,
-            None => return (100, font_size.max(12)),
-        };
-        let canvas: web_sys::HtmlCanvasElement = match document.create_element("canvas") {
-            Ok(el) => match el.dyn_into() {
-                Ok(c) => c,
-                Err(_) => return (100, font_size.max(12)),
-            },
-            Err(_) => return (100, font_size.max(12)),
-        };
-        canvas.set_width(1);
-        canvas.set_height(1);
-        let ctx: web_sys::CanvasRenderingContext2d = match canvas
-            .get_context("2d")
-            .ok()
-            .flatten()
-        {
-            Some(c) => match c.dyn_into() {
-                Ok(ctx) => ctx,
-                Err(_) => return (100, font_size.max(12)),
-            },
-            None => return (100, font_size.max(12)),
+        let Some(ctx) = native_text_measurement_context() else {
+            return (100, font_size.max(12));
         };
 
         let mut parts: Vec<String> = Vec::new();

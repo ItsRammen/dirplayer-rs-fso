@@ -6291,8 +6291,14 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             // Canvas2D native measurement otherwise. Wrap at the inner content
             // width (field_width minus border/margin/shadow) so multi-line
             // wrapped text reports the real height.
-            let measured_height: Option<i32> =
-                measure_field_text_height(player, field_member, field_width, extras);
+            // Only #adjust uses the measured content height below. Fixed,
+            // scroll and limit fields keep their authored box even when text
+            // overflows; measuring them on every hit-test was wasted work.
+            let measured_height: Option<i32> = if is_adjust {
+                measure_field_text_height(player, field_member, field_width, extras)
+            } else {
+                None
+            };
 
             let measured_plus_extras = measured_height.map(|h| h + extras);
 

@@ -2102,14 +2102,8 @@ impl BuiltInHandlerManager {
                         // Build the measurement context once and reuse it for all
                         // word-wrap probes below.
                         let measure_ctx = {
-                            use wasm_bindgen::JsCast;
                             let font_str = format!("{}px \"{}\", Arial, sans-serif", display_font_size, display_font_name.replace('"', ""));
-                            web_sys::window()
-                                .and_then(|w| w.document())
-                                .and_then(|d| d.create_element("canvas").ok())
-                                .and_then(|el| el.dyn_into::<web_sys::HtmlCanvasElement>().ok())
-                                .and_then(|c| c.get_context("2d").ok().flatten())
-                                .and_then(|c| c.dyn_into::<web_sys::CanvasRenderingContext2d>().ok())
+                            super::datum_handlers::cast_member::font::native_text_measurement_context()
                                 .map(|ctx| { ctx.set_font(&font_str); ctx })
                         };
                         let measure = |s: &str| -> f64 {
@@ -3095,13 +3089,7 @@ fn count_wraps_before_index(
     wrap_w: i16,
     target_char_idx: usize,
 ) -> usize {
-    use wasm_bindgen::JsCast;
-    let ctx_opt = web_sys::window()
-        .and_then(|w| w.document())
-        .and_then(|d| d.create_element("canvas").ok())
-        .and_then(|el| el.dyn_into::<web_sys::HtmlCanvasElement>().ok())
-        .and_then(|c| c.get_context("2d").ok().flatten())
-        .and_then(|c| c.dyn_into::<web_sys::CanvasRenderingContext2d>().ok());
+    let ctx_opt = super::datum_handlers::cast_member::font::native_text_measurement_context();
     let Some(ctx) = ctx_opt else { return 0; };
     // Same face + fallback as the native text renderer draws with.
     ctx.set_font(&format!("{}px \"{}\", Arial, sans-serif", font_size, font_name.replace('"', "")));
