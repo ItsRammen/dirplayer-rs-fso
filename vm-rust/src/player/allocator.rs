@@ -229,8 +229,8 @@ pub trait DatumAllocatorTrait {
     fn get_datum(&self, id: &DatumRef) -> &Datum;
     fn get_datum_mut(&mut self, id: &DatumRef) -> &mut Datum;
     /// Free the arena entry for `id`. If the freed entry was holding an
-    /// ephemeral `Datum::BitmapRef`, returns that `BitmapRef` so the caller
-    /// can run `bitmap_manager.decref_ephemeral(...)` outside of the
+    /// `Datum::BitmapRef`, returns that `BitmapRef` so the caller
+    /// can run `bitmap_manager.decref_bitmap(...)` outside of the
     /// allocator's borrow. Returning `None` means no bitmap work is owed.
     fn on_datum_ref_dropped(
         &mut self,
@@ -445,9 +445,9 @@ impl DatumAllocator {
         self.int_dealloc_count = 0;
     }
 
-    /// Free arena slot `id`. Returns the ephemeral `BitmapRef` (if any) that
+    /// Free arena slot `id`. Returns the `BitmapRef` (if any) that
     /// the freed entry was holding, so the caller can run
-    /// `bitmap_manager.decref_ephemeral` after returning — keeps the bitmap
+    /// `bitmap_manager.decref_bitmap` after returning — keeps the bitmap
     /// manager hop outside of the allocator's own borrow.
     fn dealloc_datum(
         &mut self,
@@ -545,10 +545,8 @@ impl DatumAllocatorTrait for DatumAllocator {
         }
 
         let is_int = matches!(&datum, Datum::Int(_));
-        // Capture the bitmap ref (if any) BEFORE moving `datum` into the
-        // entry — we incref ephemeral bitmaps so they survive as long as at
-        // least one arena entry references them. Cast-member-owned bitmaps
-        // aren't in `ephemeral_refs` so the incref is a no-op for them.
+        // Track member-owned views too: their member can be erased while the
+        // image datum remains live. Count arena entries, not DatumRef clones.
         let bitmap_to_incref = if let Datum::BitmapRef(bm_ref) = &datum {
             Some(*bm_ref)
         } else {
@@ -567,14 +565,20 @@ impl DatumAllocatorTrait for DatumAllocator {
             self.int_alloc_count += 1;
         }
         if let Some(bm_ref) = bitmap_to_incref {
-            // Reach the bitmap manager via PLAYER_OPT. The allocator and
+            // Reach the active player's bitmap manager, matching DatumRef::drop. The allocator and
             // bitmap manager are both fields of DirPlayer; we touch the
             // bitmap manager AFTER finishing the allocator's own arena work
             // so the two &mut borrows don't overlap.
             unsafe {
-                if let Some(player) = crate::player::PLAYER_OPT.as_mut() {
+                let player_opt = if crate::player::ACTIVE_PLAYER_ID == 0 {
+                    crate::player::PLAYER_OPT.as_mut()
+                } else {
+                    crate::player::NESTED_PLAYERS.get_mut(crate::player::ACTIVE_PLAYER_ID - 1)
+                        .and_then(|player| player.as_mut())
+                };
+                if let Some(player) = player_opt {
                     let player_ptr = player as *mut crate::player::DirPlayer;
-                    (*player_ptr).bitmap_manager.incref_ephemeral(bm_ref);
+                    (*player_ptr).bitmap_manager.incref_bitmap(bm_ref);
                 }
             }
         }

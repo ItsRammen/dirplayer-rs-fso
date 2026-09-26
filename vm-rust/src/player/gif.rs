@@ -145,7 +145,7 @@ pub fn decode_gif(data: &[u8], bitmap_manager: &mut BitmapManager) -> Option<Gif
         let mut bitmap = Bitmap::new(w, h, 32, 32, 8, PaletteRef::BuiltIn(BuiltInPalette::SystemWin));
         bitmap.data = buf.into_raw();
         bitmap.use_alpha = true;
-        frames.push(bitmap_manager.add_bitmap(bitmap));
+        frames.push(bitmap_manager.add_movie_bitmap(bitmap));
         delays_ms.push(delay.max(20));
         // A runaway file must not exhaust memory.
         if frames.len() >= 240 {

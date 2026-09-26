@@ -5,116 +5,175 @@ use super::bitmap::Bitmap;
 pub type BitmapRef = u32;
 pub const INVALID_BITMAP_REF: BitmapRef = 0;
 
+struct ManagedBitmap {
+    bitmap: Bitmap,
+    datum_refs: u32,
+    anchored: bool,
+    retain_until_movie_clear: bool,
+}
+
 pub struct BitmapManager {
-    bitmaps: HashMap<BitmapRef, Bitmap>,
+    bitmaps: HashMap<BitmapRef, ManagedBitmap>,
     ref_counter: BitmapRef,
-    /// Side table for ephemeral bitmaps — those produced by Lingo getters
-    /// like `(the stage).image`, `image(w, h, d)`, `bitmap.duplicate()`,
-    /// member `.image` accessors, etc. The value is the number of
-    /// `Datum::BitmapRef` arena entries currently pointing at the bitmap;
-    /// when it drops to zero the bitmap is freed.
-    ///
-    /// Cast-member-owned bitmaps are NOT in this map and are never freed by
-    /// the refcount path — they live as long as the cast member does.
-    ephemeral_refs: HashMap<BitmapRef, u32>,
 }
 
 impl BitmapManager {
     pub fn new() -> Self {
-        Self {
-            bitmaps: HashMap::new(),
-            ref_counter: 0,
-            ephemeral_refs: HashMap::new(),
-        }
+        Self { bitmaps: HashMap::new(), ref_counter: 0 }
     }
 
-    /// Drop every stored bitmap when switching movies. Cast-member-owned
-    /// (anchored) bitmaps are never removed by the ephemeral refcount path, so
-    /// without this they orphan here forever: loading a new movie replaces the
-    /// cast list but leaks the previous movie's bitmaps (Infestation's ~363
-    /// bitmaps, ~10 MB+ decoded, on every load — memory that never comes back).
-    /// `ref_counter` is NOT reset so freshly-issued refs can't collide with any
-    /// `Datum::BitmapRef` that a persisted global still holds.
+    /// Clear movie-owned pixels without reusing IDs still held by old datums.
     pub fn clear_movie_bitmaps(&mut self) {
         self.bitmaps.clear();
-        self.ephemeral_refs.clear();
     }
 
-    /// Register an anchored bitmap (owned by a cast member or other long-lived
-    /// holder). Will not be auto-freed when DatumRefs drop.
+    /// Register pixels owned by a cast member or another long-lived holder.
     pub fn add_bitmap(&mut self, bitmap: Bitmap) -> BitmapRef {
         self.ref_counter += 1;
+        self.bitmaps.insert(self.ref_counter, ManagedBitmap {
+            bitmap, datum_refs: 0, anchored: true, retain_until_movie_clear: false,
+        });
+        self.ref_counter
+    }
 
-        let bitmap_ref = self.ref_counter;
-        self.bitmaps.insert(bitmap_ref, bitmap);
+    /// Register resources also retained outside the cast, such as GIF animation frames.
+    /// A member only borrows these pixels; removing it must not invalidate the holder.
+    pub fn add_movie_bitmap(&mut self, bitmap: Bitmap) -> BitmapRef {
+        let bitmap_ref = self.add_bitmap(bitmap);
+        self.bitmaps.get_mut(&bitmap_ref).unwrap().retain_until_movie_clear = true;
         bitmap_ref
     }
 
-    /// Register an ephemeral bitmap. Once the last `Datum::BitmapRef(N)`
-    /// arena entry is dropped, the bitmap is freed. Use for `(the stage)
-    /// .image`, `image(w, h, d)`, `bitmap.duplicate()`, member `.image`
-    /// snapshots — anywhere a Lingo expression produces a bitmap with no
-    /// other persistent owner.
+    /// Register an image whose lifetime will be held by Lingo BitmapRef datums.
     pub fn add_ephemeral_bitmap(&mut self, bitmap: Bitmap) -> BitmapRef {
-        self.ref_counter += 1;
-
-        let bitmap_ref = self.ref_counter;
-        self.bitmaps.insert(bitmap_ref, bitmap);
-        // Start at 0 — the caller's `alloc_datum(Datum::BitmapRef(...))` will
-        // bump it via `incref_ephemeral`. If for some reason the bitmap is
-        // never wrapped in a DatumRef the entry leaks, but that's rare and
-        // strictly better than the previous always-leak behaviour.
-        self.ephemeral_refs.insert(bitmap_ref, 0);
+        let bitmap_ref = self.add_bitmap(bitmap);
+        self.bitmaps.get_mut(&bitmap_ref).unwrap().anchored = false;
         bitmap_ref
+    }
+
+    /// Release a removed/replaced member's ownership, preserving saved Lingo images.
+    pub fn release_anchor(&mut self, bitmap_ref: BitmapRef) {
+        let should_free = self.bitmaps.get_mut(&bitmap_ref).map(|entry| {
+            entry.anchored = false;
+            !entry.retain_until_movie_clear && entry.datum_refs == 0
+        }).unwrap_or(false);
+        if should_free {
+            self.bitmaps.remove(&bitmap_ref);
+        }
     }
 
     pub fn replace_bitmap(&mut self, bitmap_ref: BitmapRef, mut bitmap: Bitmap) {
-        // Increment version to indicate the bitmap has changed
-        // This allows texture caches to know when to re-upload
-        if let Some(old_bitmap) = self.bitmaps.get(&bitmap_ref) {
-            bitmap.version = old_bitmap.version.wrapping_add(1);
+        if let Some(entry) = self.bitmaps.get_mut(&bitmap_ref) {
+            bitmap.version = entry.bitmap.version.wrapping_add(1);
+            entry.bitmap = bitmap;
+        } else {
+            self.bitmaps.insert(bitmap_ref, ManagedBitmap {
+                bitmap, datum_refs: 0, anchored: true, retain_until_movie_clear: false,
+            });
         }
-        self.bitmaps.insert(bitmap_ref, bitmap);
     }
 
-    #[allow(dead_code)]
     pub fn get_bitmap(&self, bitmap_ref: BitmapRef) -> Option<&Bitmap> {
-        self.bitmaps.get(&bitmap_ref)
+        self.bitmaps.get(&bitmap_ref).map(|entry| &entry.bitmap)
     }
 
-    #[allow(dead_code)]
     pub fn get_bitmap_mut(&mut self, bitmap_ref: BitmapRef) -> Option<&mut Bitmap> {
-        // Increment version when giving mutable access, as the bitmap may be modified
-        // This ensures texture caches know to re-upload the texture
-        if let Some(bitmap) = self.bitmaps.get_mut(&bitmap_ref) {
-            bitmap.version = bitmap.version.wrapping_add(1);
-            Some(bitmap)
-        } else {
-            None
+        self.bitmaps.get_mut(&bitmap_ref).map(|entry| {
+            entry.bitmap.version = entry.bitmap.version.wrapping_add(1);
+            &mut entry.bitmap
+        })
+    }
+
+    /// Track every BitmapRef datum, including views saved before a member is erased.
+    pub fn incref_bitmap(&mut self, bitmap_ref: BitmapRef) {
+        if let Some(entry) = self.bitmaps.get_mut(&bitmap_ref) {
+            entry.datum_refs += 1;
         }
     }
 
-    /// Bump the ephemeral refcount for `bitmap_ref`. No-op for anchored
-    /// bitmaps (those not in `ephemeral_refs`). Called by the allocator
-    /// when a new arena entry wrapping `Datum::BitmapRef(N)` is created.
-    pub fn incref_ephemeral(&mut self, bitmap_ref: BitmapRef) {
-        if let Some(count) = self.ephemeral_refs.get_mut(&bitmap_ref) {
-            *count = count.saturating_add(1);
-        }
-    }
-
-    /// Decrement the ephemeral refcount. If it reaches zero the bitmap and
-    /// its tracking entry are removed. No-op for anchored bitmaps.
-    pub fn decref_ephemeral(&mut self, bitmap_ref: BitmapRef) {
-        let should_free = if let Some(count) = self.ephemeral_refs.get_mut(&bitmap_ref) {
-            *count = count.saturating_sub(1);
-            *count == 0
-        } else {
-            false
-        };
+    pub fn decref_bitmap(&mut self, bitmap_ref: BitmapRef) {
+        let should_free = self.bitmaps.get_mut(&bitmap_ref).map(|entry| {
+            entry.datum_refs = entry.datum_refs.saturating_sub(1);
+            !entry.anchored && !entry.retain_until_movie_clear && entry.datum_refs == 0
+        }).unwrap_or(false);
         if should_free {
-            self.ephemeral_refs.remove(&bitmap_ref);
             self.bitmaps.remove(&bitmap_ref);
         }
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use crate::player::bitmap::bitmap::{BuiltInPalette, PaletteRef};
+
+    fn image() -> Bitmap {
+        Bitmap::new(8, 8, 32, 32, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale))
+    }
+
+    #[test]
+    fn animation_owned_frame_survives_member_removal_until_movie_clear() {
+        let mut manager = BitmapManager::new();
+        let id = manager.add_movie_bitmap(image());
+        manager.incref_bitmap(id);
+        manager.release_anchor(id);
+        manager.decref_bitmap(id);
+        assert!(manager.get_bitmap(id).is_some());
+        manager.clear_movie_bitmaps();
+        assert!(manager.get_bitmap(id).is_none());
+    }
+
+    #[test]
+    fn saved_member_image_outlives_its_anchor_until_the_last_datum_drops() {
+        let mut manager = BitmapManager::new();
+        let id = manager.add_bitmap(image());
+        manager.incref_bitmap(id);
+        manager.incref_bitmap(id);
+        manager.release_anchor(id);
+        manager.decref_bitmap(id);
+        assert!(manager.get_bitmap(id).is_some());
+        manager.decref_bitmap(id);
+        assert!(manager.get_bitmap(id).is_none());
+    }
+
+    #[test]
+    fn dropping_a_view_keeps_the_member_alive_and_unviewed_release_frees_it() {
+        let mut manager = BitmapManager::new();
+        let id = manager.add_bitmap(image());
+        manager.incref_bitmap(id);
+        manager.decref_bitmap(id);
+        assert!(manager.get_bitmap(id).is_some());
+        manager.release_anchor(id);
+        assert!(manager.get_bitmap(id).is_none());
+    }
+
+    #[test]
+    fn replacing_pixels_preserves_the_saved_image_lifetime_and_version() {
+        let mut manager = BitmapManager::new();
+        let id = manager.add_bitmap(image());
+        manager.incref_bitmap(id);
+        let version = manager.get_bitmap(id).unwrap().version;
+        manager.replace_bitmap(id, image());
+        assert_eq!(manager.get_bitmap(id).unwrap().version, version + 1);
+        manager.release_anchor(id);
+        assert!(manager.get_bitmap(id).is_some());
+        manager.decref_bitmap(id);
+        assert!(manager.get_bitmap(id).is_none());
+    }
+
+    #[test]
+    fn ephemeral_images_still_free_on_last_reference_and_old_ids_are_not_reused() {
+        let mut manager = BitmapManager::new();
+        let old = manager.add_ephemeral_bitmap(image());
+        manager.incref_bitmap(old);
+        manager.decref_bitmap(old);
+        assert!(manager.get_bitmap(old).is_none());
+        let other = manager.add_bitmap(image());
+        manager.clear_movie_bitmaps();
+        let new = manager.add_bitmap(image());
+        manager.decref_bitmap(other);
+        manager.release_anchor(old);
+        assert!(new > other && other > old);
+        assert!(manager.get_bitmap(new).is_some());
     }
 }

@@ -98,11 +98,11 @@ impl Drop for DatumRef {
                     };
                     if let Some(player) = player_opt {
                         let bitmap_to_decref = player.allocator.on_datum_ref_dropped(*id);
-                        // If the freed entry held an ephemeral Datum::BitmapRef
+                        // If the freed entry held a Datum::BitmapRef
                         // we now own a decref. Apply it AFTER the allocator hop
                         // so the two field borrows on `player` don't overlap.
                         if let Some(bm_ref) = bitmap_to_decref {
-                            player.bitmap_manager.decref_ephemeral(bm_ref);
+                            player.bitmap_manager.decref_bitmap(bm_ref);
                         }
                     }
                 }

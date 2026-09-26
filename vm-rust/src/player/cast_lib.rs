@@ -107,9 +107,8 @@ impl CastLib {
         0
     }
 
-    pub fn remove_member(&mut self, number: u32) {
-        // TODO remove from movie script cache
-        self.members.remove(&number);
+    pub fn remove_member(&mut self, number: u32) -> Option<CastMember> {
+        let removed = self.members.remove(&number);
         self.scripts.remove(&number);
         self.invalidate_name_index();
         JsApi::on_cast_member_name_changed(CastMemberRefHandlers::get_cast_slot_number(
@@ -117,6 +116,7 @@ impl CastLib {
             number,
         ));
         JsApi::dispatch_cast_member_list_changed(self.number);
+        removed
     }
 
     pub async fn preload(
@@ -244,7 +244,7 @@ impl CastLib {
     }
 
 
-    fn clear(&mut self) {
+    fn clear(&mut self, bitmap_manager: &mut BitmapManager) {
         // Clear regardless of state. The previous early-return-when-not-Loaded
         // guard left stale members in place when a swap-in-place reload went
         // through the network path of `preload`: that path sets
@@ -261,6 +261,11 @@ impl CastLib {
             && self.state == CastLibState::None
         {
             return;
+        }
+        for member in self.members.values() {
+            if let CastMemberType::Bitmap(bitmap) = &member.member_type {
+                bitmap_manager.release_anchor(bitmap.image_ref);
+            }
         }
         self.members.clear();
         self.scripts.clear();
@@ -344,7 +349,7 @@ impl CastLib {
         load_file_name: &str,
         bitmap_manager: &mut BitmapManager,
     ) {
-        self.clear();
+        self.clear(bitmap_manager);
         // TODO file.parseScripts
 
         self.file_name = load_file_name.to_owned();
@@ -402,6 +407,7 @@ impl CastLib {
             self.insert_member(
                 *id,
                 CastMember::from(self.number, *id, member_def, &self.lctx, bitmap_manager, self.dir_version, self.palette_id_offset, font_table),
+                bitmap_manager,
             );
             JsApi::on_cast_member_name_changed(CastMemberRefHandlers::get_cast_slot_number(
                 self.number,
@@ -418,7 +424,7 @@ impl CastLib {
         };
     }
 
-    pub fn insert_member(&mut self, number: u32, member: CastMember) {
+    pub fn insert_member(&mut self, number: u32, member: CastMember, bitmap_manager: &mut BitmapManager) {
         // Which lctx script should we register under this member's slot, and as
         // what type? A `Script` cast member registers its own script. A non-Script
         // member (Field, Text, Bitmap, Button, Shape) may carry an ATTACHED script
@@ -493,7 +499,18 @@ impl CastLib {
             });
         }
 
-        self.members.insert(number, member);
+        let next_image = match &member.member_type {
+            CastMemberType::Bitmap(b) => Some(b.image_ref),
+            _ => None,
+        };
+        if let Some(old) = self.members.insert(number, member) {
+            if let CastMemberType::Bitmap(b) = old.member_type {
+                // A move transfers the same anchor; replacing pixels is distinct.
+                if next_image != Some(b.image_ref) {
+                    bitmap_manager.release_anchor(b.image_ref);
+                }
+            }
+        }
         self.invalidate_name_index();
     }
 
@@ -610,7 +627,7 @@ impl CastLib {
                 member_type
             ))),
         })?;
-        self.insert_member(number, member);
+        self.insert_member(number, member, bitmap_manager);
         JsApi::dispatch_cast_member_list_changed(self.number);
         Ok(cast_member_ref(self.number as i32, number as i32))
     }
@@ -823,9 +840,10 @@ mod name_index_tests {
     #[test]
     fn find_by_name_is_case_insensitive_and_lowest_number_wins() {
         let mut cast = empty_cast();
-        cast.insert_member(5, field_member(5, "Window"));
-        cast.insert_member(2, field_member(2, "window")); // duplicate name, lower number
-        cast.insert_member(9, field_member(9, "Frame"));
+        let mut bitmaps = BitmapManager::new();
+        cast.insert_member(5, field_member(5, "Window"), &mut bitmaps);
+        cast.insert_member(2, field_member(2, "window"), &mut bitmaps); // duplicate name, lower number
+        cast.insert_member(9, field_member(9, "Frame"), &mut bitmaps);
 
         // Lowest-numbered match wins; lookup is case-insensitive.
         assert_eq!(cast.find_member_by_name("WINDOW").map(|m| m.number), Some(2));
@@ -839,7 +857,8 @@ mod name_index_tests {
     #[test]
     fn index_invalidates_on_rename_and_remove() {
         let mut cast = empty_cast();
-        cast.insert_member(3, field_member(3, "Alpha"));
+        let mut bitmaps = BitmapManager::new();
+        cast.insert_member(3, field_member(3, "Alpha"), &mut bitmaps);
         assert_eq!(cast.find_member_by_name("alpha").map(|m| m.number), Some(3)); // builds index
 
         // Rename: mutate the member then invalidate (mirrors the name-setter,
@@ -853,5 +872,123 @@ mod name_index_tests {
         cast.members.remove(&3);
         cast.invalidate_name_index();
         assert!(cast.find_member_by_name("beta").is_none());
+    }
+    #[test]
+    fn bitmap_ownership_replacement_reclaims_old_map_images() {
+        let mut cast = empty_cast();
+        let mut manager = BitmapManager::new();
+        let mut allocated = Vec::new();
+        for _entry in 0..10 {
+            for slot in [21, 145, 146, 147] {
+                cast.create_member_at(slot, "bitmap", &mut manager).unwrap();
+                let bitmap_ref = match &cast.members.get(&slot).unwrap().member_type {
+                    CastMemberType::Bitmap(b) => b.image_ref,
+                    _ => unreachable!(),
+                };
+                manager.replace_bitmap(bitmap_ref, Bitmap::new(
+                    544, 384, 16, 16, 0,
+                    PaletteRef::BuiltIn(BuiltInPalette::GrayScale),
+                ));
+                allocated.push(bitmap_ref);
+            }
+        }
+        let live_refs: Vec<_> = cast.members.values().filter_map(|m| match &m.member_type {
+            CastMemberType::Bitmap(b) => Some(b.image_ref),
+            _ => None,
+        }).collect();
+        let retained_old: Vec<_> = allocated.iter().filter(|r| !live_refs.contains(r))
+            .filter_map(|r| manager.get_bitmap(*r)).collect();
+        let retained_bytes: usize = retained_old.iter().map(|b| b.data.len()).sum();
+        println!("AUDIT: 10 replacements x 4 slots; {} active members; {} superseded bitmaps retained; {} old pixel bytes", live_refs.len(), retained_old.len(), retained_bytes);
+        assert_eq!(live_refs.len(), 4);
+        assert_eq!(retained_old.len(), 0);
+        assert_eq!(retained_bytes, 0);
+    }
+
+    #[test]
+    fn bitmap_ownership_duplicate_move_erase_preserve_saved_image_datums() {
+        use crate::director::lingo::datum::Datum;
+        use crate::player::{reserve_player_mut, reserve_player_ref};
+        use crate::player::testing::{run_test, TestPlayer};
+        use crate::player::symbols::builtin::BuiltInSymbol;
+        run_test(async {
+            let _player = TestPlayer::new();
+            let (source, dest, source_image, old_dest) = reserve_player_mut(|p| {
+                p.movie.cast_manager.casts = vec![empty_cast()];
+                let cast = p.movie.cast_manager.get_cast_mut(1);
+                let source = cast.create_member_at(1, "bitmap", &mut p.bitmap_manager).unwrap();
+                let dest = cast.create_member_at(2, "bitmap", &mut p.bitmap_manager).unwrap();
+                let image_ref = |r: &CastMemberRef| match &cast.members[&(r.cast_member as u32)].member_type {
+                    CastMemberType::Bitmap(b) => b.image_ref,
+                    _ => unreachable!(),
+                };
+                let a = image_ref(&source);
+                let b = image_ref(&dest);
+                let mut image = Bitmap::new(4, 4, 32, 32, 8, PaletteRef::BuiltIn(BuiltInPalette::GrayScale));
+                image.data.fill(7);
+                p.bitmap_manager.replace_bitmap(a, image);
+                (p.alloc_datum(Datum::CastMember(source)), p.alloc_datum(Datum::CastMember(dest)), a, b)
+            });
+            CastMemberRefHandlers::call(&source, Symbol::builtin(BuiltInSymbol::Duplicate), &vec![dest.clone()]).unwrap();
+            let duplicate_image = reserve_player_mut(|p| {
+                assert!(p.bitmap_manager.get_bitmap(old_dest).is_none());
+                let image = match &p.movie.cast_manager.get_cast_mut(1).members[&2].member_type {
+                    CastMemberType::Bitmap(b) => b.image_ref,
+                    _ => unreachable!(),
+                };
+                assert_ne!(image, source_image);
+                p.bitmap_manager.get_bitmap_mut(image).unwrap().data[0] = 9;
+                assert_eq!(p.bitmap_manager.get_bitmap(source_image).unwrap().data[0], 7);
+                image
+            });
+            CastMemberRefHandlers::call(&source, Symbol::builtin(BuiltInSymbol::Move), &vec![dest.clone()]).unwrap();
+            let (saved, second_view) = reserve_player_mut(|p| {
+                assert!(!p.movie.cast_manager.get_cast_mut(1).members.contains_key(&1));
+                assert!(p.bitmap_manager.get_bitmap(duplicate_image).is_none());
+                (p.alloc_datum(Datum::BitmapRef(source_image)), p.alloc_datum(Datum::BitmapRef(source_image)))
+            });
+            let saved_clone = saved.clone();
+            CastMemberRefHandlers::call(&dest, Symbol::builtin(BuiltInSymbol::Erase), &vec![]).unwrap();
+            drop(saved);
+            drop(second_view);
+            reserve_player_ref(|p| assert_eq!(p.bitmap_manager.get_bitmap(source_image).unwrap().data[0], 7));
+            drop(saved_clone);
+            reserve_player_ref(|p| assert!(p.bitmap_manager.get_bitmap(source_image).is_none()));
+            drop(source);
+            drop(dest);
+        });
+    }
+
+    #[test]
+    fn bitmap_ownership_replacement_with_a_field_releases_the_old_image() {
+        let mut cast = empty_cast();
+        let mut bitmaps = BitmapManager::new();
+        cast.create_member_at(1, "bitmap", &mut bitmaps).unwrap();
+        let image = match &cast.members[&1].member_type {
+            CastMemberType::Bitmap(b) => b.image_ref,
+            _ => unreachable!(),
+        };
+        cast.create_member_at(1, "field", &mut bitmaps).unwrap();
+        assert!(bitmaps.get_bitmap(image).is_none());
+    }
+
+    #[test]
+    fn bitmap_ownership_cast_clear_preserves_saved_images_only() {
+        let mut cast = empty_cast();
+        let mut bitmaps = BitmapManager::new();
+        let mut refs = Vec::new();
+        for slot in 1..=2 {
+            cast.create_member_at(slot, "bitmap", &mut bitmaps).unwrap();
+            if let CastMemberType::Bitmap(bitmap) = &cast.members[&slot].member_type {
+                refs.push(bitmap.image_ref);
+            }
+        }
+        bitmaps.incref_bitmap(refs[0]);
+        cast.clear(&mut bitmaps);
+        assert!(cast.members.is_empty());
+        assert!(bitmaps.get_bitmap(refs[0]).is_some());
+        assert!(bitmaps.get_bitmap(refs[1]).is_none());
+        bitmaps.decref_bitmap(refs[0]);
+        assert!(bitmaps.get_bitmap(refs[0]).is_none());
     }
 }
