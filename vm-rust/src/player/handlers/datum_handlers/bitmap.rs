@@ -642,7 +642,7 @@ impl BitmapDatumHandlers {
             // case-insensitively as Director does.
             match_ci!(shape_type, {
                 "rect" => {
-                    bitmap.stroke_rect(x1, y1, x2, y2, color, &palettes, alpha);
+                    bitmap.stroke_rect_thick(x1, y1, x2, y2, color, &palettes, alpha, thickness);
                 },
                 "oval" => {
                     bitmap.stroke_ellipse(x1, y1, x2, y2, color, &palettes, alpha, thickness);

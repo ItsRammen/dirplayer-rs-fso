@@ -146,6 +146,8 @@ impl Renderer for DynamicRenderer {
             DynamicRenderer::Canvas2D(r) => r.draw_frame(player),
             DynamicRenderer::WebGL2(r) => r.draw_frame(player),
         }
+        // The stage now shows every sprite where it is.
+        player.drawn_rects.clear();
     }
 
     fn capture_stage_bitmap(&mut self, player: &mut DirPlayer) -> Bitmap {

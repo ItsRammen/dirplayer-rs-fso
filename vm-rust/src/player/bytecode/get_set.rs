@@ -379,6 +379,45 @@ impl GetSetBytecodeHandler {
 
                             let lc = prop_name.to_ascii_lowercase();
                             let is_style_prop = lc == "textstyle" || lc == "fontstyle";
+                            // `set the foreColor of line N of field` colours
+                            // just that chunk (ROTL's chat colours each line by
+                            // message type). Palette indices resolve like the
+                            // renderer resolves field text colour.
+                            let colored = if lc == "forecolor" && chunk_expr.is_some() {
+                                use crate::player::handlers::datum_handlers::string_chunk::StringChunkHandlers;
+                                use crate::player::cast_member::CastMemberType;
+                                use crate::player::bitmap::bitmap::{resolve_color_ref, get_system_default_palette, PaletteRef};
+                                use crate::player::sprite::ColorRef;
+                                let color_ref = match &value {
+                                    Datum::Int(i) => Some(ColorRef::PaletteIndex(*i as u8)),
+                                    Datum::Float(f) => Some(ColorRef::PaletteIndex(*f as u8)),
+                                    other => other.to_color_ref().ok().cloned(),
+                                };
+                                let rgb = color_ref.map(|c| {
+                                    let palettes = player.movie.cast_manager.palettes();
+                                    resolve_color_ref(&palettes, &c, &PaletteRef::BuiltIn(get_system_default_palette()), 8)
+                                });
+                                match (rgb, player.movie.cast_manager.find_mut_member_by_ref(&member_ref)) {
+                                    (Some(rgb), Some(member)) => {
+                                        if let CastMemberType::Field(field) = &mut member.member_type {
+                                            let text = field.text.clone();
+                                            let (char_start, char_end) = StringChunkHandlers::resolve_chunk_char_range(&text, chunk_expr.as_ref().unwrap());
+                                            let byte_start = text.char_indices().nth(char_start).map(|(b, _)| b).unwrap_or_else(|| text.len()) as u32;
+                                            let byte_end = text.char_indices().nth(char_end).map(|(b, _)| b).unwrap_or_else(|| text.len()) as u32;
+                                            field.apply_color_to_byte_range(byte_start, byte_end, rgb);
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                    _ => false,
+                                }
+                            } else {
+                                false
+                            };
+                            if colored {
+                                return Ok(HandlerExecutionResult::Advance);
+                            }
                             // Per-character style set (`set the textStyle of
                             // line N of field` and friends): translate the
                             // chunk to a byte range and rewrite the field's
@@ -1023,8 +1062,17 @@ impl GetSetBytecodeHandler {
                         Ok(player.alloc_datum(result))
                     }
                     None => {
-                        warn!("get cast member prop '{}': member not found", prop_name);
-                        Ok(player.alloc_datum(Datum::Void))
+                        // `the number of member "missing"` is -1 in Director:
+                        // it's the standard existence test. ROTL tells items
+                        // from hirelings with `the number of member(name &
+                        // "Hireling", 0) = -1`; VOID sent every item's info
+                        // panel down the hireling branch, which lost its image.
+                        if prop_name == Symbol::builtin(BuiltInSymbol::Number) {
+                            Ok(player.alloc_datum(Datum::Int(-1)))
+                        } else {
+                            warn!("get cast member prop '{}': member not found", prop_name);
+                            Ok(player.alloc_datum(Datum::Void))
+                        }
                     }
                 }
             } else if prop_type == 0x0a || prop_type == 0x0c {

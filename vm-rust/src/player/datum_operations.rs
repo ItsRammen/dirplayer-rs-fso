@@ -1059,18 +1059,18 @@ pub fn divide_datums(
             let (vals, flags) = inline_scalar_4(*a, *af, d, true, |x, y| x / y);
             Datum::Rect(vals, flags)
         }
-        (Datum::Int(left), Datum::String(right)) => {
-            let right_val = TypeHandlers::float_impl(right).ok_or_else(|| {
-                ScriptError::new(format!("Cannot divide int by string: {}", right))
-            })?;
-            Datum::Float((*left as f64) / right_val)
-        }
-        (Datum::Float(left), Datum::String(right)) => {
-            let right_val = TypeHandlers::float_impl(right).ok_or_else(|| {
-                ScriptError::new(format!("Cannot divide float by string: {}", right))
-            })?;
-            Datum::Float(left / right_val)
-        }
+        // A string divisor that isn't a number (EMPTY included) divides like
+        // VOID, giving 0, and a numeric one of 0 is coerced to 1 like an int
+        // divisor. ROTL draws its hireling bars with `HPCur * 100 / HPfull`
+        // for every slot, empty ones included, where HPfull is "".
+        (Datum::Int(left), Datum::String(right)) => match TypeHandlers::float_impl(right) {
+            Some(right_val) => Datum::Float((*left as f64) / if right_val == 0.0 { 1.0 } else { right_val }),
+            None => Datum::Int(0),
+        },
+        (Datum::Float(left), Datum::String(right)) => match TypeHandlers::float_impl(right) {
+            Some(right_val) => Datum::Float(left / if right_val == 0.0 { 1.0 } else { right_val }),
+            None => Datum::Int(0),
+        },
         (Datum::String(left), Datum::Int(right)) => {
             let left_float = TypeHandlers::float_impl(left).unwrap_or(0.0);
             Datum::Float(left_float / (*right as f64))

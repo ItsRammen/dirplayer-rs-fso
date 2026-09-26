@@ -701,6 +701,12 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 let scripted_sprite = get_sprite_at(player, x, y, true);
                 if let Some(sprite_number) = scripted_sprite {
                     player.mouse_down_sprite = sprite_number as i16;
+                    player.mouse_down_sprite_loc = player
+                        .movie
+                        .score
+                        .get_sprite(sprite_number as i16)
+                        .map(|s| (s.loc_h, s.loc_v))
+                        .unwrap_or((0, 0));
                 } else {
                     player.mouse_down_sprite = -1;
                 }
@@ -983,6 +989,36 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             });
             if was_scroll_drag {
                 return Ok(DatumRef::Void);
+            }
+
+            // Director handles a click between frames, after exitFrame. A
+            // sprite the movie drags by script therefore sits under the
+            // pointer when the release is hit-tested: ROTL's held inventory
+            // item follows the mouse in exitFrame, and a release that beat
+            // that exitFrame landed off the item, so the drop (give, equip,
+            // sell, drop) silently did nothing. When the pressed sprite has
+            // moved since mouseDown, let the current frame cycle finish first.
+            let moved_since_down = reserve_player_ref(|player| {
+                let n = player.mouse_down_sprite;
+                n > 0
+                    && player
+                        .movie
+                        .score
+                        .get_sprite(n)
+                        .map(|s| (s.loc_h, s.loc_v) != player.mouse_down_sprite_loc)
+                        .unwrap_or(false)
+            });
+            if moved_since_down {
+                let start = reserve_player_ref(|player| player.frame_cycles);
+                for _ in 0..50 {
+                    if reserve_player_ref(|player| player.frame_cycles) != start {
+                        break;
+                    }
+                    let _ = async_std::future::timeout(
+                        std::time::Duration::from_millis(4),
+                        async_std::future::pending::<()>(),
+                    ).await;
+                }
             }
 
             // Update mouse state and determine which sprite to notify

@@ -59,6 +59,11 @@ pub struct FieldMember {
     /// and `member.char[N].fontStyle` resolve by walking these runs.
     /// Empty when the field has uniform styling (older parser behaviour).
     pub formatting_runs: Vec<crate::director::chunks::text::StxtFormattingRun>,
+    /// The text `formatting_runs` were last aligned to. Scripts change
+    /// `text` directly (`put after`, `delete line 1`, `put into`), so the
+    /// runs are re-aligned to the current text on demand — see
+    /// `current_runs` / `sync_runs`.
+    pub runs_text: String,
     pub text_height: u16,  // Text area height from FieldInfo (for dimension calculations)
     /// FieldInfo `max_height` (bytes 22-23) — the field's authored BOX height.
     ///
@@ -71,6 +76,10 @@ pub struct FieldMember {
     /// coincide (156/156), which is why only one of the two ever looked wrong.
     pub max_height: u16,
     pub fixed_line_space: u16,  // Line spacing for text rendering
+    /// `fixed_line_space` was filled in with the natural line height (see
+    /// `natural_line_space`) rather than authored, so a `fontSize` change
+    /// recomputes it and `the fixedLineSpace` still reads 0.
+    pub auto_line_space: bool,
     pub top_spacing: i16,
     pub box_type: BuiltInSymbol,
     pub anti_alias: bool,
@@ -286,7 +295,179 @@ fn ensure_run_boundary(
     }
 }
 
+/// Re-aligns STXT runs (byte positions into `old`) to `new`. Director keeps a
+/// style attached to the characters it covers, so an edit — taken as the span
+/// between the longest common prefix and suffix — moves the runs with the
+/// text: text inserted there takes the style of the character before it
+/// (a replaced chunk keeps its first character's style), runs inside a
+/// deleted span collapse to its end, and runs after it shift by the change
+/// in length.
+fn realign_runs(
+    runs: &[crate::director::chunks::text::StxtFormattingRun],
+    old: &str,
+    new: &str,
+) -> Vec<crate::director::chunks::text::StxtFormattingRun> {
+    if old == new || runs.is_empty() {
+        return runs.to_vec();
+    }
+    let (ob, nb) = (old.as_bytes(), new.as_bytes());
+    let mut prefix = ob.iter().zip(nb).take_while(|(a, b)| a == b).count();
+    while prefix > 0 && !(old.is_char_boundary(prefix) && new.is_char_boundary(prefix)) {
+        prefix -= 1;
+    }
+    let max_suffix = (ob.len() - prefix).min(nb.len() - prefix);
+    let mut suffix = ob.iter().rev().zip(nb.iter().rev())
+        .take(max_suffix)
+        .take_while(|(a, b)| a == b)
+        .count();
+    while suffix > 0
+        && !(old.is_char_boundary(ob.len() - suffix) && new.is_char_boundary(nb.len() - suffix))
+    {
+        suffix -= 1;
+    }
+    let old_end = ob.len() - suffix;
+    let new_end = nb.len() - suffix;
+
+    let mut out: Vec<crate::director::chunks::text::StxtFormattingRun> = runs
+        .iter()
+        .map(|r| {
+            let p = r.start_position as usize;
+            let np = if p < prefix || (p == prefix && prefix < old_end) {
+                p
+            } else if p < old_end {
+                new_end
+            } else {
+                p - old_end + new_end
+            };
+            let mut moved = r.clone();
+            moved.start_position = np as u32;
+            moved
+        })
+        .collect();
+    // Stable sort, then keep the LAST run at each position: it is the one
+    // that styles the text from there on.
+    out.sort_by_key(|r| r.start_position);
+    let mut deduped: Vec<crate::director::chunks::text::StxtFormattingRun> = Vec::with_capacity(out.len());
+    for r in out {
+        if let Some(last) = deduped.last_mut() {
+            if last.start_position == r.start_position {
+                *last = r;
+                continue;
+            }
+        }
+        deduped.push(r);
+    }
+    let len = nb.len() as u32;
+    if deduped.len() > 1 {
+        let first = deduped[0].clone();
+        deduped.retain(|r| r.start_position < len || r.start_position == 0);
+        if deduped.is_empty() {
+            deduped.push(first);
+        }
+    }
+    if let Some(first) = deduped.first_mut() {
+        first.start_position = 0;
+    }
+    deduped
+}
+
 impl FieldMember {
+    /// The formatting runs aligned to the current text (see `runs_text`).
+    pub fn current_runs(&self) -> std::borrow::Cow<'_, [crate::director::chunks::text::StxtFormattingRun]> {
+        if self.runs_text == self.text {
+            std::borrow::Cow::Borrowed(&self.formatting_runs)
+        } else {
+            std::borrow::Cow::Owned(realign_runs(&self.formatting_runs, &self.runs_text, &self.text))
+        }
+    }
+
+    /// Stores the re-aligned runs, before anything edits them.
+    pub fn sync_runs(&mut self) {
+        if self.runs_text != self.text {
+            self.formatting_runs = realign_runs(&self.formatting_runs, &self.runs_text, &self.text);
+            self.runs_text = self.text.clone();
+        }
+    }
+
+    /// A field with uniform styling may have no runs; give partial styling
+    /// a base run (member-wide font, inherited colour) to split.
+    fn ensure_base_run(&mut self) {
+        use crate::director::chunks::text::StxtFormattingRun;
+        if self.formatting_runs.is_empty() {
+            self.formatting_runs.push(StxtFormattingRun {
+                start_position: 0,
+                height: self.font_size.max(1),
+                ascent: self.font_size,
+                font_id: self.font_id.unwrap_or(0),
+                style: text_style_string_to_byte(&self.font_style),
+                font_size: self.font_size.max(1),
+                color_r: 0,
+                color_g: 0,
+                color_b: 0,
+            });
+        }
+    }
+
+    /// `set the foreColor of <chunk> of field`: colours just that byte range,
+    /// splitting runs at its ends. Director colours per character, so each
+    /// line of a chat field keeps its own colour; before this the whole field
+    /// took the colour of the last line written.
+    ///
+    /// Runs store QuickDraw 16-bit channels, and the renderer treats an
+    /// all-zero run colour as "inherit the field colour", so explicit black
+    /// is stored one step above zero in blue (still draws as black).
+    pub fn apply_color_to_byte_range(&mut self, byte_start: u32, byte_end: u32, rgb: (u8, u8, u8)) {
+        self.sync_runs();
+        let text_len = self.text.len() as u32;
+        let end = byte_end.min(text_len);
+        let start = byte_start.min(end);
+        if start >= end {
+            return;
+        }
+        self.ensure_base_run();
+        ensure_run_boundary(&mut self.formatting_runs, start);
+        if end < text_len {
+            ensure_run_boundary(&mut self.formatting_runs, end);
+        }
+        let widen = |c: u8| ((c as u16) << 8) | c as u16;
+        let (r, g, mut b) = (widen(rgb.0), widen(rgb.1), widen(rgb.2));
+        if r == 0 && g == 0 && b == 0 {
+            b = 0x0100;
+        }
+        for run in self.formatting_runs.iter_mut() {
+            if run.start_position >= start && run.start_position < end {
+                run.color_r = r;
+                run.color_g = g;
+                run.color_b = b;
+            }
+        }
+    }
+
+    /// Whole-field `foreColor`: Director paints every character that colour,
+    /// replacing any per-line colours. Written into the runs rather than left
+    /// to "inherit", which would fall back to the sprite's colour.
+    pub fn set_all_run_colors(&mut self, rgb: (u8, u8, u8)) {
+        let len = self.text.len() as u32;
+        if len == 0 {
+            // No characters yet: colour the runs so text added later takes it.
+            self.sync_runs();
+            let widen = |c: u8| ((c as u16) << 8) | c as u16;
+            for run in self.formatting_runs.iter_mut() {
+                run.color_r = widen(rgb.0);
+                run.color_g = widen(rgb.1);
+                run.color_b = if rgb == (0, 0, 0) { 0x0100 } else { widen(rgb.2) };
+            }
+            return;
+        }
+        self.apply_color_to_byte_range(0, len, rgb);
+    }
+
+    /// Director's line pitch for a field with no authored line height: the
+    /// font size at the Windows 96 DPI (points x 4/3), so Arial 12 steps 16px.
+    pub fn natural_line_space(font_size: u16) -> u16 {
+        ((font_size as u32 * 4 + 1) / 3) as u16
+    }
+
     pub fn new() -> FieldMember {
         FieldMember {
             text: "".to_string(),
@@ -297,9 +478,11 @@ impl FieldMember {
             font_size: 12,
             font_id: None,
             formatting_runs: Vec::new(),
+            runs_text: String::new(),
             text_height: 100,
             max_height: 0,
             fixed_line_space: 0,
+            auto_line_space: false,
             top_spacing: 0,
             box_type: BuiltInSymbol::Adjust,
             anti_alias: false,
@@ -361,29 +544,14 @@ impl FieldMember {
     /// handler relies on this to highlight the clicked topic line and clear
     /// the previous one.
     pub fn apply_style_to_byte_range(&mut self, byte_start: u32, byte_end: u32, new_style: u8) {
-        use crate::director::chunks::text::StxtFormattingRun;
+        self.sync_runs();
         let text_len = self.text.len() as u32;
         let end = byte_end.min(text_len);
         let start = byte_start.min(end);
         if start >= end {
             return;
         }
-        // A field authored with uniform styling may have no runs; synthesize
-        // a base run from the member-wide font so partial styling has
-        // something to split.
-        if self.formatting_runs.is_empty() {
-            self.formatting_runs.push(StxtFormattingRun {
-                start_position: 0,
-                height: self.font_size.max(1),
-                ascent: self.font_size,
-                font_id: self.font_id.unwrap_or(0),
-                style: text_style_string_to_byte(&self.font_style),
-                font_size: self.font_size.max(1),
-                color_r: 0,
-                color_g: 0,
-                color_b: 0,
-            });
-        }
+        self.ensure_base_run();
         ensure_run_boundary(&mut self.formatting_runs, start);
         if end < text_len {
             ensure_run_boundary(&mut self.formatting_runs, end);
@@ -416,10 +584,17 @@ impl FieldMember {
             font_size: 12,
             font_id: None,
             formatting_runs: Vec::new(),
+            runs_text: String::new(),
             text_height: field_info.text_height,  // Text area height for dimension calculations
             max_height: field_info.max_height,
             fixed_line_space: 0,  // Use default line spacing for text rendering
-            top_spacing: field_info.scroll as i16,
+            auto_line_space: false,
+            // Bytes 12-13 are the saved scroll position, which is `scrollTop`
+            // below — not spacing. Used as both, the text sat `scroll` px
+            // lower whenever scrollTop moved off its saved value (ROTL's
+            // profile quest list, saved scrolled, drew its lines at the
+            // bottom of the box and scrolled into empty space).
+            top_spacing: 0,
             box_type: field_info.box_type(),
             anti_alias: false,
             width: field_info.width(),  // Calculated from rect
@@ -5470,6 +5645,7 @@ impl CastMember {
                 // collapse to a single uniform style and the script's
                 // link-detection logic never fires.
                 field_member.formatting_runs = formatting_runs.clone();
+                field_member.runs_text = field_member.text.clone();
                 // Pick the DOMINANT font_size — the size used by the most
                 // characters — as the member-wide default. Director's
                 // rendering effectively uses this size for the bulk of
@@ -5605,6 +5781,15 @@ impl CastMember {
                         cast_lib: cast_lib as i32,
                         cast_member: number as i32, // member's own slot; attached script registered at scripts[number]
                     });
+                }
+
+                // No authored line height: use Director's natural one. ROTL's
+                // Windows-authored fields store 0 here, and Director lays their
+                // Arial 12 out on a 16px pitch (measured against the Windows
+                // projector) where the font size alone gave 12px.
+                if field_member.fixed_line_space == 0 && field_member.font_size > 0 {
+                    field_member.fixed_line_space = FieldMember::natural_line_space(field_member.font_size);
+                    field_member.auto_line_space = true;
                 }
 
                 debug!(
@@ -6746,5 +6931,46 @@ impl CastMember {
             bg_color: initial_bg_color,
             reg_point,
         }
+    }
+}
+
+#[cfg(test)]
+mod realign_runs_tests {
+    use super::realign_runs;
+    use crate::director::chunks::text::StxtFormattingRun;
+
+    fn run(start: u32, c: u16) -> StxtFormattingRun {
+        StxtFormattingRun { start_position: start, height: 12, ascent: 10, font_id: 0, style: 0, font_size: 12, color_r: c, color_g: 0, color_b: 0 }
+    }
+    fn starts(runs: &[StxtFormattingRun]) -> Vec<(u32, u16)> {
+        runs.iter().map(|r| (r.start_position, r.color_r)).collect()
+    }
+
+    #[test]
+    fn appended_line_extends_the_last_run() {
+        let runs = vec![run(0, 1), run(4, 2)];
+        let out = realign_runs(&runs, "aaa\rbbb", "aaa\rbbb\rccc");
+        assert_eq!(starts(&out), vec![(0, 1), (4, 2)]);
+    }
+
+    #[test]
+    fn deleting_the_first_line_shifts_the_rest() {
+        let runs = vec![run(0, 1), run(4, 2), run(8, 3)];
+        let out = realign_runs(&runs, "aaa\rbbb\rccc", "bbb\rccc");
+        assert_eq!(starts(&out), vec![(0, 2), (4, 3)]);
+    }
+
+    #[test]
+    fn replacing_all_text_keeps_the_first_style() {
+        let runs = vec![run(0, 1), run(4, 2)];
+        let out = realign_runs(&runs, "aaa\rbbb", "zz");
+        assert_eq!(starts(&out), vec![(0, 1)]);
+    }
+
+    #[test]
+    fn insertion_takes_the_preceding_style() {
+        let runs = vec![run(0, 1), run(3, 2)];
+        let out = realign_runs(&runs, "aaabbb", "aaaXXbbb");
+        assert_eq!(starts(&out), vec![(0, 1), (5, 2)]);
     }
 }

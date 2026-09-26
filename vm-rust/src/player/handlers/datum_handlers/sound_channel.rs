@@ -3009,11 +3009,26 @@ impl SoundChannel {
             debug!("8-bit PCM detected → converting to 16-bit");
             let mut converted = Vec::with_capacity(data.len() * 2);
             for &byte in data {
-                let sample_16 = ((byte as i32 - 128) * 257) as i16;
+                // Unsigned 8-bit, centred on 0x80. Shift rather than scale by
+                // 257: (0 - 128) * 257 = -32896 wrapped to +32640, turning
+                // every negative peak into a full-scale positive click.
+                let sample_16 = ((byte as i32 - 128) << 8) as i16;
                 converted.extend_from_slice(&sample_16.to_le_bytes());
             }
             converted
         } else {
+            // The file's byte order is not the samples' byte order: ROTL, a
+            // Windows (little-endian) movie, stores its sndS samples
+            // big-endian, and read little-endian every 16-bit sound came out
+            // as harsh noise under the right envelope. Real audio moves in
+            // small steps; byte-swapped audio jumps by whole high bytes, so
+            // take whichever order is smoother, and fall back to the flag
+            // only when that is inconclusive (silence, very short data).
+            let big_endian = if bits_per_sample == 16 {
+                Self::pcm16_is_big_endian(data, channels).unwrap_or(big_endian)
+            } else {
+                big_endian
+            };
             debug!("Assuming PCM16 → big_endian={}", big_endian);
             if bits_per_sample == 16 && big_endian {
                 let mut converted = Vec::with_capacity(data.len());
@@ -3073,6 +3088,33 @@ impl SoundChannel {
             );
 
         Ok(wav)
+    }
+
+    /// Which byte order makes 16-bit PCM `data` smoother: Some(true) for
+    /// big-endian, Some(false) for little-endian, None when neither reading
+    /// is clearly smoother. Compares successive samples of the same channel.
+    pub fn pcm16_is_big_endian(data: &[u8], channels: u16) -> Option<bool> {
+        let stride = channels.max(1) as usize;
+        let frames = data.len() / 2;
+        if frames <= stride * 8 {
+            return None;
+        }
+        let limit = frames.min(200_000);
+        let (mut be_steps, mut le_steps) = (0u64, 0u64);
+        for i in stride..limit {
+            let (a, b) = ((i - stride) * 2, i * 2);
+            let be = |k: usize| i16::from_be_bytes([data[k], data[k + 1]]) as i32;
+            let le = |k: usize| i16::from_le_bytes([data[k], data[k + 1]]) as i32;
+            be_steps += (be(b) - be(a)).unsigned_abs() as u64;
+            le_steps += (le(b) - le(a)).unsigned_abs() as u64;
+        }
+        if be_steps * 2 < le_steps {
+            Some(true)
+        } else if le_steps * 2 < be_steps {
+            Some(false)
+        } else {
+            None
+        }
     }
 
     /// Decodes raw IMA ADPCM data (4-bit samples) into 16-bit PCM samples (i16).
@@ -4641,5 +4683,54 @@ mod fade_tests {
         assert!((ch.fade_duration - 1.0).abs() < 1e-9);
         ch.fade_in(250, 1.0);
         assert!((ch.fade_duration - 0.25).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod pcm_decode_tests {
+    use super::SoundChannel;
+
+    fn sine(n: usize) -> Vec<i16> {
+        (0..n).map(|i| ((i as f32 * 0.05).sin() * 12000.0) as i16).collect()
+    }
+
+    fn wav_samples(wav: &[u8]) -> Vec<i16> {
+        wav[44..].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect()
+    }
+
+    #[test]
+    fn big_endian_samples_flagged_little_endian_still_decode() {
+        // ROTL: Windows movie, big-endian sndS samples.
+        let wave = sine(4000);
+        let bytes: Vec<u8> = wave.iter().flat_map(|s| s.to_be_bytes()).collect();
+        let wav = SoundChannel::load_director_sound_from_bytes(&bytes, 1, 22050, 16, "raw_pcm", Some(4000), false).unwrap();
+        assert_eq!(wav_samples(&wav), wave);
+    }
+
+    #[test]
+    fn little_endian_samples_are_left_alone() {
+        let wave = sine(4000);
+        let bytes: Vec<u8> = wave.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let wav = SoundChannel::load_director_sound_from_bytes(&bytes, 1, 22050, 16, "raw_pcm", Some(4000), true).unwrap();
+        assert_eq!(wav_samples(&wav), wave);
+    }
+
+    #[test]
+    fn stereo_byte_order_is_detected_per_channel() {
+        let l = sine(3000);
+        let r: Vec<i16> = l.iter().map(|s| -s / 2).collect();
+        let bytes: Vec<u8> = l.iter().zip(&r).flat_map(|(a, b)| [a.to_be_bytes(), b.to_be_bytes()]).flatten().collect();
+        assert_eq!(SoundChannel::pcm16_is_big_endian(&bytes, 2), Some(true));
+    }
+
+    #[test]
+    fn silence_is_inconclusive() {
+        assert_eq!(SoundChannel::pcm16_is_big_endian(&[0u8; 4000], 1), None);
+    }
+
+    #[test]
+    fn eight_bit_extremes_do_not_wrap() {
+        let wav = SoundChannel::load_director_sound_from_bytes(&[0x00, 0x80, 0xFF], 1, 11025, 8, "raw_pcm", Some(3), false).unwrap();
+        assert_eq!(wav_samples(&wav), vec![-32768, 0, 32512]);
     }
 }

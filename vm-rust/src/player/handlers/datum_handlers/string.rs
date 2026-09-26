@@ -325,14 +325,19 @@ pub fn string_get_lines(value: &str) -> Vec<String> {
     if value.is_empty() {
         return Vec::new();
     }
-    let line_break = if value.contains("\r\n") {
-        "\r\n"
-    } else if value.contains("\n") {
-        "\n"
+    // Director's line delimiter is RETURN. A CRLF pair counts as one break,
+    // and text with no RETURN at all splits on LF. Text can mix the two
+    // (ROTL's chat gets CRLF lines from the server and appends "\r" lines),
+    // so every RETURN splits — not just the CRLF ones.
+    if value.contains('\r') {
+        value
+            .split('\r')
+            .enumerate()
+            .map(|(i, s)| if i > 0 { s.strip_prefix('\n').unwrap_or(s) } else { s }.to_string())
+            .collect()
     } else {
-        "\r"
-    };
-    value.split(line_break).map(|s| s.to_string()).collect()
+        value.split('\n').map(|s| s.to_string()).collect()
+    }
 }
 
 /// Trim an expression string so all brackets/parens are matched.

@@ -455,10 +455,9 @@ impl Bitmap {
                     self.data[index] = result_index;
                 }
                 16 => {
-                    let r = r as f32 * 31.0 / 255.0;
-                    let g = g as f32 * 63.0 / 255.0;
-                    let b = b as f32 * 31.0 / 255.0;
-                    let value = Rgb565::pack_565((r as u8, g as u8, b as u8));
+                    // Drop the low bits, as Director does, so a colour written to
+                    // a 16-bit image reads back unchanged (see get_pixel_color_ref).
+                    let value = Rgb565::pack_565((r >> 3, g >> 2, b >> 3));
                     let bytes = value.to_le_bytes();
                     self.data[index] = bytes[0];
                     self.data[index + 1] = bytes[1];
@@ -567,10 +566,9 @@ impl Bitmap {
                 self.data[index] = result_index;
             }
             16 => {
-                let r = r as f32 * 31.0 / 255.0;
-                let g = g as f32 * 63.0 / 255.0;
-                let b = b as f32 * 31.0 / 255.0;
-                let value = Rgb565::pack_565((r as u8, g as u8, b as u8));
+                // Drop the low bits, as Director does, so a colour written to
+                // a 16-bit image reads back unchanged (see get_pixel_color_ref).
+                let value = Rgb565::pack_565((r >> 3, g >> 2, b >> 3));
                 let bytes = value.to_le_bytes();
                 let index = (y * self.width as usize + x) * 2;
                 self.data[index] = bytes[0];
@@ -632,9 +630,14 @@ impl Bitmap {
                 let index = (y * self.width as usize + x) * 2;
                 let value = u16::from_le_bytes([self.data[index], self.data[index + 1]]);
                 let (red, green, blue) = Rgb565::unpack_565(value);
-                let red = (red as f32 / 31.0 * 255.0) as u8;
-                let green = (green as f32 / 63.0 * 255.0) as u8;
-                let blue = (blue as f32 / 31.0 * 255.0) as u8;
+                // Bit replication: the exact inverse of the truncating pack in
+                // set_pixel, so rgb(49, 231, 33) survives a round trip. Scaling
+                // with truncation turned it into rgb(41, 230, 32), and a
+                // background-transparent ink keyed on the original colour then
+                // matched nothing (ROTL's map layers drew as solid green).
+                let red = (red << 3) | (red >> 2);
+                let green = (green << 2) | (green >> 4);
+                let blue = (blue << 3) | (blue >> 2);
                 ColorRef::Rgb(red, green, blue)
             }
             32 => {
@@ -781,6 +784,42 @@ impl Bitmap {
             let blended_right = blend_color_alpha(right_color, color, alpha);
             self.set_pixel(left as i32, y as i32, blended_left, palettes);
             self.set_pixel(right as i32, y as i32, blended_right, palettes);
+        }
+    }
+
+    /// A `#rect` outline `thickness` pixels wide, drawn inward from the
+    /// rect's edge as Director's pen does: a pen as wide as the rect fills it.
+    /// ROTL clears its 800x448 shadow buffer with
+    /// `draw(0, 0, 800, 448, [#shapeType: #rect, #lineSize: 800, ...])`, and
+    /// erases single 32px tiles with a 32px pen.
+    pub fn stroke_rect_thick(
+        &mut self,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        color: (u8, u8, u8),
+        palettes: &PaletteMap,
+        alpha: f32,
+        thickness: i32,
+    ) {
+        if thickness <= 1 {
+            return self.stroke_rect(x1, y1, x2, y2, color, palettes, alpha);
+        }
+        let t = thickness;
+        for y in y1.max(0)..y2.min(self.height as i32) {
+            let on_band_row = y < y1 + t || y >= y2 - t;
+            for x in x1.max(0)..x2.min(self.width as i32) {
+                if !(on_band_row || x < x1 + t || x >= x2 - t) {
+                    continue;
+                }
+                let blended = if alpha >= 1.0 {
+                    color
+                } else {
+                    blend_color_alpha(self.get_pixel_color(palettes, x as u16, y as u16), color, alpha)
+                };
+                self.set_pixel(x, y, blended, palettes);
+            }
         }
     }
 
@@ -1803,6 +1842,12 @@ impl Bitmap {
         if let Some(blend_level) = param_list.get("blendLevel") {
             if let Ok(level) = blend_level.int_value() {
                 blend = ((level as f64 * 100.0 / 255.0).round() as i32).max(0).min(100);
+                // Keep "below full" visible: 254 rounds to 100 but takes
+                // Director's blended path, which colourises (see
+                // `ink36_blend_colorize`). 99% vs 99.6% opacity is invisible.
+                if level < 255 {
+                    blend = blend.min(99);
+                }
                 if ink == 0 { ink = 32; } // auto-set blend ink when blendLevel is specified
             }
         }
@@ -2922,8 +2967,24 @@ impl Bitmap {
                         continue;
                     }
 
+                    // A blended copy (blendLevel below 255) colourises along the
+                    // #color→#bgColor ramp, black to white; see
+                    // `ink36_blend_colorize` in the general path.
+                    let sprite_fg = params.sprite.map_or(false, |sp| sp.has_fore_color);
+                    let sprite_bg = params.sprite.map_or(false, |sp| sp.has_back_color);
+                    let has_fg = sprite_fg || params.fore_color_explicit;
+                    let has_bg = sprite_bg || params.bg_color_explicit;
+                    let src_color = if ink == 36 && alpha < 0.999 && (has_fg || has_bg) {
+                        let eff_fg = if has_fg { fg_color_resolved } else { (0u8, 0u8, 0u8) };
+                        let eff_bg = if has_bg { bg_color_resolved } else { (255u8, 255u8, 255u8) };
+                        let t = ((r as u16 + g as u16 + b as u16) / 3) as f32 / 255.0;
+                        (
+                            ((1.0 - t) * eff_fg.0 as f32 + t * eff_bg.0 as f32) as u8,
+                            ((1.0 - t) * eff_fg.1 as f32 + t * eff_bg.1 as f32) as u8,
+                            ((1.0 - t) * eff_fg.2 as f32 + t * eff_bg.2 as f32) as u8,
+                        )
                     // Colorize foreground (black/dark) pixels with the sprite's foreColor
-                    let src_color = if (r, g, b) == (0, 0, 0) {
+                    } else if (r, g, b) == (0, 0, 0) {
                         fg_color_resolved
                     } else {
                         (r, g, b)
@@ -3192,8 +3253,17 @@ impl Bitmap {
                 let sprite_bg = params.sprite.map_or(false, |sp| sp.has_back_color);
                 let has_fg = sprite_fg || params.fore_color_explicit;
                 let has_bg = sprite_bg || params.bg_color_explicit;
+                // Background-transparent copies of a 32-bit image colourise
+                // too when they blend (blendLevel below 255): white takes
+                // #bgColor, black #color. At full opacity Director copies the
+                // pixels as they are. ROTL tints its hireling labels this way:
+                // name and level grey, "MP" blue (blendLevel 254), while the
+                // HP/MP numbers (blendLevel 255, #bgColor black) stay white.
+                let ink36_blend_colorize =
+                    ink == 36 && params.blend < 100 && src.original_bit_depth == 32;
                 if (has_fg || has_bg)
-                    && Self::allows_colorize(src.original_bit_depth, ink, params.is_text_rendering)
+                    && (Self::allows_colorize(src.original_bit_depth, ink, params.is_text_rendering)
+                        || ink36_blend_colorize)
                 {
                     match src.original_bit_depth {
                         // ---------- 32-BIT ----------
@@ -3207,7 +3277,7 @@ impl Bitmap {
                             // alone and expects `cc.bubble.left`'s white
                             // interior AND its rounded-corner gradient to all
                             // take on the chest colour.
-                            if (has_fg || has_bg) && Self::uses_back_color(32, ink) {
+                            if (has_fg || has_bg) && (Self::uses_back_color(32, ink) || ink36_blend_colorize) {
                                 let gray = ((sr as u16 + sg as u16 + sb as u16) / 3) as u8;
                                 let eff_fg = if has_fg { fg_color_resolved } else { (0u8, 0u8, 0u8) };
                                 let eff_bg = if has_bg { bg_color_resolved } else { (255u8, 255u8, 255u8) };

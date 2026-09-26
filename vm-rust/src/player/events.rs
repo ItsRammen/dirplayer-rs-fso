@@ -21,6 +21,10 @@ pub enum PlayerVMEvent {
     Global(Symbol, Vec<DatumRef>),
     Targeted(Symbol, Vec<DatumRef>, Option<Vec<ScriptInstanceRef>>),
     Callback(DatumRef, Symbol, Vec<DatumRef>),
+    /// A mouse event for one sprite, delivered in Director's order: the
+    /// sprite's behaviors, then its cast member script, then the frame and
+    /// movie scripts.
+    SpriteMouse(Symbol, u16),
 }
 
 pub fn player_dispatch_global_event(handler_name: Symbol, args: &Vec<DatumRef>) {
@@ -119,9 +123,14 @@ pub fn dispatch_rollover_events() {
     let (now_hovered, prev_hovered) = reserve_player_mut(|player| {
         let (x, y) = player.mouse_loc;
         let prev_hovered = std::mem::take(&mut player.hovered_sprites);
-        let now_hovered: Vec<i16> = crate::player::score::get_sprites_at(player, x, y)
-            .first()
-            .map(|num| *num as i16)
+        // The front-most ACTIVE sprite (one with a behavior or cast member
+        // script), the same target a click gets: script-less sprites don't
+        // take mouse messages in Director, so a pointer over one reaches the
+        // scripted sprite beneath. ROTL's tree-top layer is a stage-sized
+        // script-less sprite drawn above the mobs; targeting the plain
+        // front-most sprite meant hovering a mob never sent it mouseEnter.
+        let now_hovered: Vec<i16> = crate::player::score::get_sprite_at(player, x, y, true)
+            .map(|num| num as i16)
             .into_iter()
             .collect();
         player.hovered_sprites = now_hovered.clone();
@@ -130,9 +139,18 @@ pub fn dispatch_rollover_events() {
 
     // Leaving is reported before entering, so a behaviour that tears down on
     // mouseLeave can't clobber the state a freshly entered sprite just set.
+    // Rollover events reach a sprite's cast member script too, not only its
+    // behaviors: ROTL's overlay buttons (event popups' Continue/Pay, …) live on
+    // pooled puppet channels with no behaviors, and swap to their glow member
+    // from the button member's own mouseEnter script.
+    let send = |name: &str, sprite_num: i16| {
+        if let Some(tx) = crate::player::active_event_tx() {
+            let _ = tx.try_send(PlayerVMEvent::SpriteMouse(Symbol::from_str(name), sprite_num as u16));
+        }
+    };
     for sprite_num in &prev_hovered {
         if !now_hovered.contains(sprite_num) {
-            player_dispatch_event_to_sprite(Symbol::from_str(&"mouseLeave".to_string()), &vec![], *sprite_num as u16);
+            send("mouseLeave", *sprite_num);
         }
     }
     for sprite_num in &now_hovered {
@@ -141,7 +159,7 @@ pub fn dispatch_rollover_events() {
         } else {
             "mouseEnter"
         };
-        player_dispatch_event_to_sprite(Symbol::from_str(&handler.to_string()), &vec![], *sprite_num as u16);
+        send(handler, *sprite_num);
     }
 }
 
@@ -195,6 +213,35 @@ pub async fn player_dispatch_event_to_sprite_targeted(
         Some(&instance_ids),
     ).await;
     reserve_player_mut(|player| std::mem::replace(&mut player.event_stopped, prev_stopped))
+}
+
+/// See `PlayerVMEvent::SpriteMouse`.
+async fn player_dispatch_sprite_mouse_event(
+    name: Symbol,
+    sprite_num: u16,
+) -> Result<DatumRef, ScriptError> {
+    let instances = reserve_player_mut(|player| {
+        let fallback = player
+            .movie
+            .score
+            .get_sprite(sprite_num as i16)
+            .map(|sprite| sprite.script_instance_list.clone());
+        fallback
+            .map(|fallback| player.get_sprite_script_instance_ids(sprite_num as i16, fallback.as_slice()))
+            .unwrap_or_default()
+    });
+    if !instances.is_empty()
+        && player_invoke_event_to_instances(name.clone(), &vec![], &instances).await?
+    {
+        return Ok(DatumRef::Void);
+    }
+    let member_handler =
+        reserve_player_mut(|player| get_member_script_handler(player, sprite_num as i16, name.as_str()));
+    if let Some(handler) = member_handler {
+        player_call_script_handler(None, handler, &vec![]).await?;
+        return Ok(DatumRef::Void);
+    }
+    player_invoke_frame_and_movie_scripts(name, &vec![]).await
 }
 
 pub async fn player_invoke_event_to_instances(
@@ -1463,6 +1510,9 @@ pub async fn run_event_loop(rx: Receiver<PlayerVMEvent>) {
             PlayerVMEvent::Callback(receiver, name, args) => {
                 player_call_datum_handler(&receiver, name, &args).await
             }
+            PlayerVMEvent::SpriteMouse(name, sprite_num) => {
+                player_dispatch_sprite_mouse_event(name, sprite_num).await
+            }
         };
         match result {
             Err(err) => {
@@ -1839,7 +1889,16 @@ pub async fn dispatch_event_to_all_behaviors(
             // A sprite with no behaviors may still carry a cast member script,
             // which is the next receiver in Director's message order — so the
             // channel can't be skipped on an empty behavior list alone.
-            let member_handler = if number > 0 {
+            // ...but only for the events Director routes to cast member scripts
+            // (mouse and keyboard). Frame events (prepareFrame, enterFrame,
+            // exitFrame, beginSprite, endSprite, idle) go to behaviors, the frame
+            // script and movie scripts only, so a member script's `exitFrame`
+            // never runs in Director.
+            let is_frame_event = matches!(
+                handler_name.as_str().to_ascii_lowercase().as_str(),
+                "prepareframe" | "enterframe" | "exitframe" | "beginsprite" | "endsprite" | "idle"
+            );
+            let member_handler = if number > 0 && !is_frame_event {
                 get_member_script_handler(player, number as i16, handler_name.as_str())
             } else {
                 None

@@ -140,10 +140,35 @@ pub(crate) fn scroll_member_by_lines(
     let line_h = scroll_line_height(fls, fs) as f64;
     let delta_px = (amount * line_h).round() as i32;
     use crate::player::cast_member::CastMemberType;
+    // Director stops a field at its last page: ROTL scrolls its chat box to
+    // the bottom with `scrollByLine(9000)`, which unclamped left the text
+    // thousands of pixels above the visible area.
+    let field_max_scroll = match player.movie.cast_manager.find_member_by_ref(member_ref).map(|m| &m.member_type) {
+        Some(CastMemberType::Field(f)) => {
+            let chrome = 2 * f.border as i32 + 2 * f.margin as i32;
+            let extras = chrome + 4 * f.box_drop_shadow as i32;
+            let content = crate::player::score::measure_field_text_height(player, f, f.width as i32, extras).unwrap_or(0);
+            // The visible page is the hosting sprite's height, as `pageHeight`
+            // reports it — not the member's own height, which can be far
+            // smaller (ROTL's chat member is 48px tall, its sprite 153px, so
+            // clamping to the member left the newest lines pinned to the top).
+            let frame = player.movie.current_frame;
+            let sprite_h = player.movie.score.get_sorted_channels(frame).iter().find_map(|ch| {
+                (ch.sprite.member.as_ref() == Some(member_ref)).then(|| ch.sprite.height as i32)
+            });
+            let rect_h = (f.rect_bottom as i32 - f.rect_top as i32).max(0);
+            let raw = sprite_h.filter(|h| *h > 0).unwrap_or((f.height as i32).max(rect_h));
+            let page = (raw - chrome).max(1);
+            Some((content - page).max(0))
+        }
+        _ => None,
+    };
     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
         match &mut member.member_type {
             CastMemberType::Field(field) => {
-                field.scroll_top = (field.scroll_top as i32 + delta_px).max(0) as u16;
+                let top = (field.scroll_top as i32 + delta_px).max(0);
+                let top = field_max_scroll.map_or(top, |max| top.min(max));
+                field.scroll_top = top as u16;
             }
             CastMemberType::Text(text) => {
                 if let Some(info) = text.info.as_mut() {

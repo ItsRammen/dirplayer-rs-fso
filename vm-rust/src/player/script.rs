@@ -792,6 +792,12 @@ pub fn get_obj_prop(
 
                     // Calculate character positions based on chunk type
                     let (char_start, char_end) = match chunk_expr.chunk_type {
+                        StringChunkType::Line => {
+                            // Line breaks can be 1 or 2 chars in mixed text;
+                            // use the shared resolver rather than a fixed width.
+                            let (s, e) = crate::player::handlers::datum_handlers::string_chunk::StringChunkHandlers::resolve_chunk_char_range(&source_str, &chunk_expr);
+                            (s as i32 + 1, e as i32)
+                        }
                         StringChunkType::Char => {
                             (start_idx as i32 + 1, end_idx_exclusive as i32)
                         }
@@ -926,7 +932,8 @@ pub fn get_obj_prop(
                                 .nth(char_start)
                                 .map(|(b, _)| b)
                                 .unwrap_or_else(|| field.text.len());
-                            let active_run = field.formatting_runs.iter()
+                            let field_runs = field.current_runs();
+                            let active_run = field_runs.iter()
                                 .rev()
                                 .find(|r| (r.start_position as usize) <= byte_start);
                             let (active_style, active_font_id) = active_run
@@ -991,7 +998,8 @@ pub fn get_obj_prop(
                                 .nth(char_start)
                                 .map(|(b, _)| b)
                                 .unwrap_or_else(|| field.text.len());
-                            let active_run = field.formatting_runs.iter().rev()
+                            let field_runs = field.current_runs();
+                            let active_run = field_runs.iter().rev()
                                 .find(|r| (r.start_position as usize) <= byte_start);
                             let (active_style, active_font_id) = active_run
                                 .map(|r| (r.style, r.font_id))

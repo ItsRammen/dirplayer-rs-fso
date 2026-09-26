@@ -980,15 +980,8 @@ pub fn player_get_sprite_at(x: f64, y: f64) -> i32 {
 #[wasm_bindgen]
 pub fn is_sprite_editable_field(sprite_id: i32) -> bool {
     reserve_player_ref(|player| {
-        let sprite = player.movie.score.get_sprite(sprite_id as i16);
-        let member = sprite
-            .and_then(|s| s.member.as_ref())
-            .and_then(|m| player.movie.cast_manager.find_member_by_ref(m));
-        member.map_or(false, |m| match &m.member_type {
-            CastMemberType::Field(f) => f.editable,
-            CastMemberType::Text(t) => t.info.as_ref().map_or(false, |i| i.editable),
-            _ => false,
-        })
+        // Member flag or `the editable of sprite` (ROTL's profile bio).
+        crate::player::keyboard_events::sprite_text_is_editable(player, sprite_id as i16)
     })
 }
 
@@ -1055,13 +1048,14 @@ pub fn is_field_focused() -> bool {
         if player.keyboard_focus_sprite < 0 { return false; }
         let sprite_id = player.keyboard_focus_sprite as i16;
         let sprite = player.movie.score.get_sprite(sprite_id);
+        let editable = crate::player::keyboard_events::sprite_text_is_editable(player, sprite_id);
         let member = sprite
             .and_then(|s| s.member.as_ref())
             .and_then(|m| player.movie.cast_manager.find_member_by_ref(m));
         member.map_or(false, |m| matches!(&m.member_type,
-            CastMemberType::Field(f) if f.editable
+            CastMemberType::Field(f) if editable
         ) || matches!(&m.member_type,
-            CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable)
+            CastMemberType::Text(t) if editable
         ))
     })
 }
@@ -1075,15 +1069,16 @@ pub fn get_focused_field_selected_text() -> String {
         if player.keyboard_focus_sprite < 0 { return String::new(); }
         let sprite_id = player.keyboard_focus_sprite as i16;
         let sprite = player.movie.score.get_sprite(sprite_id);
+        let editable = crate::player::keyboard_events::sprite_text_is_editable(player, sprite_id);
         let member = sprite
             .and_then(|s| s.member.as_ref())
             .and_then(|m| player.movie.cast_manager.find_member_by_ref(m));
         let Some(member) = member else { return String::new() };
         let (text, lo, hi) = match &member.member_type {
-            CastMemberType::Field(f) if f.editable => {
+            CastMemberType::Field(f) if editable => {
                 (&f.text, f.sel_start, f.sel_end)
             }
-            CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => {
+            CastMemberType::Text(t) if editable => {
                 (&t.text, t.sel_start, t.sel_end)
             }
             _ => return String::new(),
@@ -1110,15 +1105,16 @@ pub fn field_select_all() {
         if player.keyboard_focus_sprite < 0 { return; }
         let sprite_id = player.keyboard_focus_sprite as i16;
         let sprite = player.movie.score.get_sprite(sprite_id);
+        let editable = crate::player::keyboard_events::sprite_text_is_editable(player, sprite_id);
         let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else { return };
         let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else {
             return;
         };
         let (len, sel_start, sel_end, sel_anchor) = match &mut member.member_type {
-            CastMemberType::Field(f) if f.editable => {
+            CastMemberType::Field(f) if editable => {
                 (f.text.len() as i32, &mut f.sel_start, &mut f.sel_end, &mut f.sel_anchor)
             }
-            CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => {
+            CastMemberType::Text(t) if editable => {
                 (t.text.len() as i32, &mut t.sel_start, &mut t.sel_end, &mut t.sel_anchor)
             }
             _ => return,
@@ -1138,15 +1134,16 @@ pub fn delete_focused_field_selection() {
         if player.keyboard_focus_sprite < 0 { return; }
         let sprite_id = player.keyboard_focus_sprite as i16;
         let sprite = player.movie.score.get_sprite(sprite_id);
+        let editable = crate::player::keyboard_events::sprite_text_is_editable(player, sprite_id);
         let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else { return };
         let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else {
             return;
         };
         let (text, sel_start, sel_end, sel_anchor) = match &mut member.member_type {
-            CastMemberType::Field(f) if f.editable => (
+            CastMemberType::Field(f) if editable => (
                 &mut f.text, &mut f.sel_start, &mut f.sel_end, &mut f.sel_anchor,
             ),
-            CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => (
+            CastMemberType::Text(t) if editable => (
                 &mut t.text, &mut t.sel_start, &mut t.sel_end, &mut t.sel_anchor,
             ),
             _ => return,
@@ -1179,15 +1176,16 @@ pub fn ime_composition_start() {
         if player.keyboard_focus_sprite < 0 { return; }
         let sprite_id = player.keyboard_focus_sprite as i16;
         let sprite = player.movie.score.get_sprite(sprite_id);
+        let editable = crate::player::keyboard_events::sprite_text_is_editable(player, sprite_id);
         let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else { return };
         let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else {
             return;
         };
         let (text, sel_start, sel_end, sel_anchor) = match &mut member.member_type {
-            CastMemberType::Field(f) if f.editable => (
+            CastMemberType::Field(f) if editable => (
                 &mut f.text, &mut f.sel_start, &mut f.sel_end, &mut f.sel_anchor,
             ),
-            CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => (
+            CastMemberType::Text(t) if editable => (
                 &mut t.text, &mut t.sel_start, &mut t.sel_end, &mut t.sel_anchor,
             ),
             _ => return,
@@ -1213,15 +1211,16 @@ pub fn ime_composition_update(text: String) {
         if player.keyboard_focus_sprite < 0 { return; }
         let sprite_id = player.keyboard_focus_sprite as i16;
         let sprite = player.movie.score.get_sprite(sprite_id);
+        let editable = crate::player::keyboard_events::sprite_text_is_editable(player, sprite_id);
         let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else { return };
         let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else {
             return;
         };
         let (text_buf, sel_start, sel_end, sel_anchor) = match &mut member.member_type {
-            CastMemberType::Field(f) if f.editable => (
+            CastMemberType::Field(f) if editable => (
                 &mut f.text, &mut f.sel_start, &mut f.sel_end, &mut f.sel_anchor,
             ),
-            CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => (
+            CastMemberType::Text(t) if editable => (
                 &mut t.text, &mut t.sel_start, &mut t.sel_end, &mut t.sel_anchor,
             ),
             _ => return,
@@ -1259,15 +1258,16 @@ pub fn paste_text_into_focused_field(text: String) {
         if player.keyboard_focus_sprite < 0 { return; }
         let sprite_id = player.keyboard_focus_sprite as i16;
         let sprite = player.movie.score.get_sprite(sprite_id);
+        let editable = crate::player::keyboard_events::sprite_text_is_editable(player, sprite_id);
         let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else { return };
         let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else {
             return;
         };
         let (target, sel_start, sel_end, sel_anchor) = match &mut member.member_type {
-            CastMemberType::Field(f) if f.editable => (
+            CastMemberType::Field(f) if editable => (
                 &mut f.text, &mut f.sel_start, &mut f.sel_end, &mut f.sel_anchor,
             ),
-            CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => (
+            CastMemberType::Text(t) if editable => (
                 &mut t.text, &mut t.sel_start, &mut t.sel_end, &mut t.sel_anchor,
             ),
             _ => return,

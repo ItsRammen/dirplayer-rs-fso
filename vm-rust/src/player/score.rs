@@ -372,8 +372,18 @@ impl Score {
         // For cast 65535 (relative cast reference), we only use the filmloop's own cast.
         // We do NOT search other casts because that would attach unrelated behaviors
         // from the main movie to filmloop sprites.
+        // A behaviour slot must name a script member. A slot left pointing at a
+        // member that's since become a bitmap (or anything else) resolves here to
+        // that member's own cast-member script, which Director never attaches as
+        // a behaviour. ROTL's map frames have one such stale slot pointing at the
+        // "cloudy" bitmap, whose member script is old character-creation code.
         let script_exists = reserve_player_mut(|player| {
-            player.movie.cast_manager.get_script_by_ref(&script_ref).is_some()
+            let is_script_member = player
+                .movie
+                .cast_manager
+                .find_member_by_ref(&script_ref)
+                .map_or(true, |m| matches!(m.member_type, crate::player::cast_member::CastMemberType::Script(_)));
+            is_script_member && player.movie.cast_manager.get_script_by_ref(&script_ref).is_some()
         });
         let found_in_other_lib: Option<i32> = None;
 
@@ -1170,6 +1180,7 @@ impl Score {
                 }
 
                 sprite.base_loc_h = sprite.loc_h;
+                sprite.lingo_positioned = false;
                 sprite.base_loc_v = sprite.loc_v;
                 sprite.base_width = sprite.width;
                 sprite.base_height = sprite.height;
@@ -1402,6 +1413,7 @@ impl Score {
                     sprite.blend = convert_raw_blend(data.blend, data.sprite_flags, dir_version);
                     // Set base_* values so tweens can work
                     sprite.base_loc_h = sprite.loc_h;
+                    sprite.lingo_positioned = false;
                     sprite.base_loc_v = sprite.loc_v;
                     sprite.base_width = sprite.width;
                     sprite.base_height = sprite.height;
@@ -2772,6 +2784,7 @@ impl Score {
 
             // Also update runtime values to match (apply_tween_modifiers will handle tweening)
             sprite.base_loc_h = sprite.loc_h;
+            sprite.lingo_positioned = false;
             sprite.base_loc_v = sprite.loc_v;
             sprite.base_width = sprite.width;
             sprite.base_height = sprite.height;
@@ -2802,6 +2815,11 @@ impl Score {
             if sprite.puppet {
                 continue;
             }
+            // Nor to a position a script set during the span: the playhead
+            // idling on one frame re-runs this every frame, and it put ROTL's
+            // "what am I standing on" probe (sprite 14, path-tweened over its
+            // span) back on its tween each frame, so no exit ever matched.
+            let lingo_positioned = sprite.lingo_positioned;
 
             let Some(keyframes) = self.keyframes_cache.get(&sprite_num) else {
                 continue;
@@ -2814,6 +2832,7 @@ impl Score {
                     .as_ref()
                     .is_some_and(|t| t.is_path_tweened())
                     && path.is_active_at_frame(frame)
+                    && !lingo_positioned
                 {
                     if let Some((dx, dy)) = path.get_delta_at_frame(
                         frame,
@@ -4143,12 +4162,15 @@ where
 fn resolve_sprite_member_assignment(
     player: &DirPlayer,
     value: &Datum,
-) -> Result<(Option<CastMemberRef>, Option<(i32, i32)>, bool), ScriptError> {
+) -> Result<(Option<CastMemberRef>, Option<(i32, i32)>, bool, bool), ScriptError> {
+    let mut unresolved_name = false;
     let mem_ref = if let Datum::CastMember(cast_member) = value {
         Some(cast_member.clone())
     } else if value.is_string() {
         let name = value.string_value()?;
-        player.movie.cast_manager.find_member_ref_by_name(&name)
+        let found = player.movie.cast_manager.find_member_ref_by_name(&name);
+        unresolved_name = found.is_none() && !name.is_empty();
+        found
     } else if value.is_number() {
         player
             .movie
@@ -4176,6 +4198,16 @@ fn resolve_sprite_member_assignment(
                     let (l, t, r, b) = flash.effective_rect();
                     Some(((r - l) as i32, (b - t) as i32))
                 }
+                // Fields and text size a sprite to their box, like any other
+                // member. Without this a pooled puppet channel switched from a
+                // bitmap to a field kept the bitmap's size — ROTL reuses channels
+                // 318-392 for every overlay, and its profile and item-description
+                // fields came out 0px wide with no visible text.
+                CastMemberType::Field(f) => {
+                    let rect_h = (f.rect_bottom as i32 - f.rect_top as i32).max(0);
+                    Some((f.width as i32, (f.height as i32).max(rect_h)))
+                }
+                CastMemberType::Text(t) => Some((t.width as i32, t.height as i32)),
                 _ => None,
             };
             let is_film_loop = matches!(&m.member_type, CastMemberType::FilmLoop(_));
@@ -4183,7 +4215,7 @@ fn resolve_sprite_member_assignment(
         })
         .unwrap_or((None, false));
 
-    Ok((mem_ref, intrinsic_size, is_film_loop))
+    Ok((mem_ref, intrinsic_size, is_film_loop, unresolved_name))
 }
 
 fn sprite_set_prop_is_noop(
@@ -4302,7 +4334,7 @@ fn sprite_set_prop_is_noop(
                 )
             }
             Some(BuiltInSymbol::Member) => {
-                let (mem_ref, _, _) = resolve_sprite_member_assignment(player, value)?;
+                let (mem_ref, _, _, _) = resolve_sprite_member_assignment(player, value)?;
                 Ok(sprite.member == mem_ref)
             }
             Some(BuiltInSymbol::MemberNum) => {
@@ -4457,6 +4489,17 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
     if !in_range {
         return Ok(());
     }
+    // Remember where the sprite was drawn before its first change since the
+    // last draw (see `DirPlayer::drawn_rects`).
+    reserve_player_mut(|player| {
+        if !player.drawn_rects.contains_key(&sprite_id) {
+            if let Ok(Datum::Rect(v, _)) = sprite_get_prop(player, sprite_id, Symbol::builtin(BuiltInSymbol::Rect)) {
+                player
+                    .drawn_rects
+                    .insert(sprite_id, (v[0] as i32, v[1] as i32, v[2] as i32, v[3] as i32));
+            }
+        }
+    });
     // Assigning VOID to an appearance property leaves it alone. VOID is not a
     // value any of these can hold, and Director neither raises nor coerces it
     // to zero — Merlin's Revenge proves both halves. Its bSpriteParams mirrors
@@ -4822,7 +4865,16 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             sprite_id,
             |player| resolve_sprite_member_assignment(player, &value),
             |sprite, value| {
-                let (mem_ref, intrinsic_size, is_film_loop) = value?;
+                let (mem_ref, intrinsic_size, is_film_loop, unresolved_name) = value?;
+
+                // A member NAME that matches nothing leaves the sprite as it
+                // is rather than blanking it. ROTL's mob animation names each
+                // frame (`Wolf-F3-S`), and wolves ship no F3 frames: clearing
+                // the member made a wolf vanish mid-fight until its next move
+                // named a frame that exists, where Director kept drawing it.
+                if unresolved_name {
+                    return Ok(());
+                }
 
                 // Detect whether the member actually changed
                 let member_changed = sprite.member != mem_ref;
@@ -5353,6 +5405,20 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
                 player.movie.score.invalidate_render_channel_cache();
             });
         }
+        let positions = ["loc", "locH", "locV", "rect", "left", "top", "right", "bottom", "quad"]
+            .iter()
+            .any(|p| prop_name.eq_ignore_ascii_case(p));
+        let unpuppets = prop_name.eq_ignore_ascii_case("puppet");
+        if positions || unpuppets {
+            reserve_player_mut(|player| {
+                let sprite = player.movie.score.get_sprite_mut(sprite_id);
+                if positions {
+                    sprite.lingo_positioned = true;
+                } else if !sprite.puppet {
+                    sprite.lingo_positioned = false;
+                }
+            });
+        }
         let prop_name_builtin = prop_name.into_builtin();
         if prop_name.eq_ignore_ascii_case("puppet") || prop_name.eq_ignore_ascii_case("type") {
             reserve_player_mut(|player| {
@@ -5417,6 +5483,16 @@ pub fn concrete_sprite_hit_test(player: &DirPlayer, sprite: &Sprite, x: i32, y: 
     // Don't test collision for invisible sprites
     if !sprite.visible || !sprite.member.is_some() {
         return false;
+    }
+    // A sprite whose member slot is empty has nothing to click, and Director
+    // lets the click through to what lies underneath. ROTL's title-screen
+    // clouds switch to an empty member on the login and character screens
+    // but keep their stage-wide rects; hit-testing them swallowed every click
+    // aimed at the name and password fields.
+    if let Some(member_ref) = sprite.member.as_ref() {
+        if player.movie.cast_manager.find_member_by_ref(member_ref).is_none() {
+            return false;
+        }
     }
     let rect = get_concrete_sprite_rect(player, sprite);
 
@@ -6215,8 +6291,14 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             // Canvas2D native measurement otherwise. Wrap at the inner content
             // width (field_width minus border/margin/shadow) so multi-line
             // wrapped text reports the real height.
-            let measured_height: Option<i32> =
-                measure_field_text_height(player, field_member, field_width, extras);
+            // Only #adjust uses the measured content height below. Fixed,
+            // scroll and limit fields keep their authored box even when text
+            // overflows; measuring them on every hit-test was wasted work.
+            let measured_height: Option<i32> = if is_adjust {
+                measure_field_text_height(player, field_member, field_width, extras)
+            } else {
+                None
+            };
 
             let measured_plus_extras = measured_height.map(|h| h + extras);
 

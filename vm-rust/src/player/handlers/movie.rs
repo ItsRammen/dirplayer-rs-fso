@@ -84,7 +84,19 @@ impl MovieHandlers {
                     Datum::CastLib(n) => Some(*n as i32),
                     _ => None,
                 };
-                if let (Some(cast_num), Ok(member_num)) = (cast_num, member_name_or_num.int_value()) {
+                // Only a member NUMBER gets these slot semantics. A name that
+                // matched nothing is not "member 0": `int_value()` reads a
+                // non-numeric string as 0, which turned `member("x", 0)` into
+                // the null member(0, 0) with number 0 instead of Director's -1.
+                // ROTL tells items from hirelings with
+                // `the number of member(name & "Hireling", 0) = -1`, so every
+                // item's info panel took the hireling branch and lost its image.
+                let member_num = match member_name_or_num {
+                    Datum::Int(n) => Ok(*n),
+                    Datum::Float(f) => Ok(*f as i32),
+                    _ => Err(()),
+                };
+                if let (Some(cast_num), Ok(member_num)) = (cast_num, member_num) {
                     if member_num > 0 {
                         Ok(player.alloc_datum(Datum::CastMember(CastMemberRef {
                             cast_lib: cast_num,
@@ -692,6 +704,7 @@ impl MovieHandlers {
                 let sprite = player.movie.score.get_sprite_mut(sprite_number as i16);
                 sprite.puppet = false;
                 sprite.entered = false;
+                sprite.lingo_positioned = false;
                 sprite.exited = false;
                 sprite.script_instance_list.clear();
                 // Mark for revert on the NEXT frame tick. If the sprite is not
@@ -1295,8 +1308,13 @@ impl MovieHandlers {
     }
 
     pub async fn update_stage(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        // An explicit updateStage draws now, handler or not.
-        reserve_player_mut(|player| player.draw_hold_since_ms = None);
+        // An explicit updateStage draws now, handler or not. Even when the
+        // actual paint is throttled, sprites count as drawn where they are
+        // (for `intersects` / `within`).
+        reserve_player_mut(|player| {
+            player.draw_hold_since_ms = None;
+            player.drawn_rects.clear();
+        });
         let should_yield = reserve_player_ref(|player| {
             // Yield when: mouse handler context, command handler yielding,
             // yield-safe state, OR mouse is currently down (covers
@@ -1515,6 +1533,27 @@ impl MovieHandlers {
             }
             Ok(DatumRef::Void)
         })
+    }
+
+    /// `quit`. A projector exits; a browser can't close its own tab, so stop
+    /// playback like `halt` and tell the page (`window.__dirplayerQuit`, when
+    /// it defines one) so it can say what happened. ROTL's File > Quit Game
+    /// ends in `quit()` after telling the server it left.
+    pub fn quit(_args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            player.is_playing = false;
+        });
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(window) = web_sys::window() {
+                if let Ok(hook) = js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("__dirplayerQuit")) {
+                    if let Some(hook) = wasm_bindgen::JsCast::dyn_ref::<js_sys::Function>(&hook) {
+                        let _ = hook.call0(&wasm_bindgen::JsValue::NULL);
+                    }
+                }
+            }
+        }
+        Ok(DatumRef::Void)
     }
 
     pub fn halt(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {

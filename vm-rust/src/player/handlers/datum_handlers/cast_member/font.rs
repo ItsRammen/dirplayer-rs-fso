@@ -19,6 +19,35 @@ use std::borrow::Borrow;
 use log::debug;
 use wasm_bindgen::JsCast;
 
+// Measurement is synchronous and never calls back into Lingo. Keep one private
+// context per browser thread instead of allocating a DOM canvas for every rect,
+// rollover and scrollbar query. Firefox's cycle collector otherwise has to tear
+// down thousands of canvas observers at once (a ROTL profile captured 5.37s).
+// This context is measurement-only: rasterization has its own canvas and must
+// never resize, scale, translate or draw into this one.
+thread_local! {
+    static NATIVE_TEXT_MEASUREMENT_CONTEXT: std::cell::RefCell<Option<web_sys::CanvasRenderingContext2d>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn native_text_measurement_context() -> Option<web_sys::CanvasRenderingContext2d> {
+    NATIVE_TEXT_MEASUREMENT_CONTEXT.with(|cached| {
+        let mut cached = cached.borrow_mut();
+        if cached.is_none() {
+            let document = web_sys::window()?.document()?;
+            let canvas: web_sys::HtmlCanvasElement = document.create_element("canvas").ok()?.dyn_into().ok()?;
+            canvas.set_width(1);
+            canvas.set_height(1);
+            *cached = Some(canvas.get_context("2d").ok()??.dyn_into().ok()?);
+        }
+        let ctx = cached.as_ref()?.clone();
+        // An invalid CSS font assignment leaves the previous font in place.
+        // Preserve a fresh canvas's fallback instead of inheriting another field.
+        ctx.set_font("10px sans-serif");
+        Some(ctx)
+    })
+}
+
 // Simple HTML parser without external dependencies
 #[derive(Clone, Debug)]
 pub struct HtmlStyle {
@@ -496,31 +525,8 @@ impl FontMemberHandlers {
         bottom_spacing: i16,
         fixed_line_space: u16,
     ) -> (u16, u16) {
-        use wasm_bindgen::JsCast;
-
-        let document = match web_sys::window().and_then(|w| w.document()) {
-            Some(d) => d,
-            None => return (100, font_size.max(12)),
-        };
-        let canvas: web_sys::HtmlCanvasElement = match document.create_element("canvas") {
-            Ok(el) => match el.dyn_into() {
-                Ok(c) => c,
-                Err(_) => return (100, font_size.max(12)),
-            },
-            Err(_) => return (100, font_size.max(12)),
-        };
-        canvas.set_width(1);
-        canvas.set_height(1);
-        let ctx: web_sys::CanvasRenderingContext2d = match canvas
-            .get_context("2d")
-            .ok()
-            .flatten()
-        {
-            Some(c) => match c.dyn_into() {
-                Ok(ctx) => ctx,
-                Err(_) => return (100, font_size.max(12)),
-            },
-            None => return (100, font_size.max(12)),
+        let Some(ctx) = native_text_measurement_context() else {
+            return (100, font_size.max(12));
         };
 
         let mut parts: Vec<String> = Vec::new();
@@ -767,7 +773,10 @@ impl FontMemberHandlers {
                 font_parts.push("italic".to_string());
             }
             font_parts.push(format!("{}px", size_px as i32));
-            font_parts.push(font_face);
+            // A face the browser doesn't have falls back like Windows does, to
+            // a sans-serif (Arial), not the browser's serif default: ROTL's
+            // password box asks for "KNO Font", which isn't in the movie.
+            font_parts.push(format!("\"{}\", Arial, sans-serif", font_face.replace('"', "")));
 
             let color = if let Some(c) = style.color {
                 (((c >> 16) & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, (c & 0xFF) as u8)
@@ -1423,7 +1432,25 @@ impl FontMemberHandlers {
                     let left = start_x + cx.round() as i32;
                     let top = start_y + line_top_y.round() as i32;
                     let bottom = top + line_h.round() as i32;
-                    bitmap.fill_rect(left, top, left + 1, bottom, (0, 0, 0), &palette_map, 1.0);
+                    // In the text colour, as Director draws it: a black caret
+                    // disappears in light-on-dark fields. Glyphs take their
+                    // colour from the styled segment under them, so use the
+                    // segment at the caret (or the first one on an empty spot).
+                    let (fx, fy) = (left as f64, (top + bottom) as f64 / 2.0);
+                    // An empty field has no segments; its caret still takes
+                    // the text colour the spans carry (the white chat bar
+                    // drew a black, invisible caret until something was typed).
+                    let span_text_color = spans.iter().find_map(|s| s.style.color).map(|c| {
+                        (((c >> 16) & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, (c & 0xFF) as u8)
+                    });
+                    let caret_color = seg_color_rects
+                        .iter()
+                        .find(|&&(x0, x1, yt, yb, _)| fx >= x0 - 1.0 && fx <= x1 + 1.0 && fy >= yt && fy < yb)
+                        .or_else(|| seg_color_rects.first())
+                        .map(|&(_, _, _, _, c)| c)
+                        .or(span_text_color)
+                        .unwrap_or(fallback_color);
+                    bitmap.fill_rect(left, top, left + 1, bottom, caret_color, &palette_map, 1.0);
                 }
             }
         }

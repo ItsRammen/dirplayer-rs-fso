@@ -696,7 +696,13 @@ impl CastManager {
                     )))
                 }
             }
-            None => Err(ScriptError::new(format!("Cast member not found"))),
+            // Director reads a missing or empty member as an empty field
+            // rather than failing: ROTL's character creation does
+            // `field(member(6, 2))` on a slot that has never held a member.
+            None => {
+                warn!("field(): no member for {:?}; reading as empty", member_name_or_num.type_str());
+                Ok(String::new())
+            }
         }
     }
 

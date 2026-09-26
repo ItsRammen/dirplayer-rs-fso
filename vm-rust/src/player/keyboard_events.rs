@@ -35,11 +35,28 @@ fn get_next_focus_sprite_id(player: &DirPlayer, after: i16) -> i16 {
             Some(CastMemberType::Text(t)) => t.info.as_ref().map_or(false, |i| i.editable),
             _ => false,
         };
-        if editable {
+        let is_text = matches!(member.map(|m| &m.member_type), Some(CastMemberType::Field(_)) | Some(CastMemberType::Text(_)));
+        if editable || (is_text && sprite.map_or(false, |s| s.editable)) {
             return sprite_id;
         }
     }
     -1
+}
+
+/// Whether a Field/Text sprite is editable: its member says so, or
+/// `the editable of sprite` was set. Director honours either; ROTL makes the
+/// profile bio editable only on your own profile with `sprite(323).editable`.
+pub(crate) fn sprite_text_is_editable(player: &DirPlayer, sprite_id: i16) -> bool {
+    let sprite = player.movie.score.get_sprite(sprite_id);
+    let sprite_editable = sprite.map_or(false, |s| s.editable);
+    let member = sprite
+        .and_then(|s| s.member.clone())
+        .and_then(|r| player.movie.cast_manager.find_member_by_ref(&r));
+    match member.map(|m| &m.member_type) {
+        Some(CastMemberType::Field(f)) => f.editable || sprite_editable,
+        Some(CastMemberType::Text(t)) => t.info.as_ref().map_or(false, |i| i.editable) || sprite_editable,
+        _ => false,
+    }
 }
 
 /// Whether the focused sprite's member is an editable Field or Text.
@@ -47,15 +64,7 @@ fn focused_member_is_editable(player: &DirPlayer) -> bool {
     if player.keyboard_focus_sprite < 0 {
         return false;
     }
-    let sprite = player.movie.score.get_sprite(player.keyboard_focus_sprite as i16);
-    let member = sprite
-        .and_then(|s| s.member.clone())
-        .and_then(|r| player.movie.cast_manager.find_member_by_ref(&r));
-    match member.map(|m| &m.member_type) {
-        Some(CastMemberType::Field(f)) => f.editable,
-        Some(CastMemberType::Text(t)) => t.info.as_ref().map_or(false, |i| i.editable),
-        _ => false,
-    }
+    sprite_text_is_editable(player, player.keyboard_focus_sprite as i16)
 }
 
 /// Apply a single edit/navigation key to a text + selection state. Mutates in
@@ -328,6 +337,47 @@ pub(crate) fn apply_text_edit(
     }
 }
 
+/// Caret index (a byte offset into `text`) for a click at `local_x`,
+/// `local_y` inside a field whose face has no bitmap font, so the browser
+/// draws it. Each character boundary on the clicked line is measured with
+/// Canvas2D, as the native text renderer measures, and the nearest one wins.
+/// Lines are split on CR only; word wrap isn't modelled.
+#[cfg(target_arch = "wasm32")]
+fn native_xy_to_caret_index(
+    text: &str,
+    font: &str,
+    font_size: u16,
+    line_h: i32,
+    local_x: i32,
+    local_y: i32,
+) -> Option<i32> {
+    let ctx = super::handlers::datum_handlers::cast_member::font::native_text_measurement_context()?;
+    // Same face + fallback as the native text renderer draws with.
+    ctx.set_font(&format!("{}px \"{}\", Arial, sans-serif", font_size, font.replace('"', "")));
+
+    let lines: Vec<&str> = text.split('\r').collect();
+    let line_idx = if line_h > 0 { (local_y.max(0) / line_h) as usize } else { 0 };
+    let line_idx = line_idx.min(lines.len().saturating_sub(1));
+    let line_start: usize = lines[..line_idx].iter().map(|l| l.len() + 1).sum();
+    let line = lines[line_idx];
+
+    let x = local_x as f64;
+    let mut best = (f64::MAX, 0usize);
+    for b in line.char_indices().map(|(b, _)| b).chain(std::iter::once(line.len())) {
+        let w = ctx.measure_text(&line[..b]).map(|m| m.width()).unwrap_or(0.0);
+        let d = (w - x).abs();
+        if d < best.0 {
+            best = (d, b);
+        }
+    }
+    Some((line_start + best.1) as i32)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_xy_to_caret_index(_: &str, _: &str, _: u16, _: i32, _: i32, _: i32) -> Option<i32> {
+    None
+}
+
 /// Mode for `set_caret_at_screen` — controls how the new position interacts
 /// with the existing selection.
 pub(crate) enum CaretAtMode {
@@ -392,11 +442,12 @@ pub(crate) fn set_caret_at_screen(
                 top_spacing: i16,
             },
         }
+        let editable = sprite_text_is_editable(player, sprite_id);
         let snapshot = {
             let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
             let Some(member) = member else { return false };
             match &member.member_type {
-                CastMemberType::Field(f) if f.editable => MemberSnapshot::Field {
+                CastMemberType::Field(f) if editable => MemberSnapshot::Field {
                     text: f.text.clone(),
                     font: f.font.clone(),
                     font_size: f.font_size,
@@ -406,9 +457,8 @@ pub(crate) fn set_caret_at_screen(
                     top_spacing: f.top_spacing,
                     word_wrap: f.word_wrap,
                 },
-                CastMemberType::Text(t)
-                    if t.info.as_ref().map_or(false, |i| i.editable) =>
-                {
+                CastMemberType::Text(_) if editable => {
+                    let CastMemberType::Text(t) = &member.member_type else { unreachable!() };
                     MemberSnapshot::Text {
                         text: t.text.clone(),
                         font: t.font.clone(),
@@ -424,7 +474,7 @@ pub(crate) fn set_caret_at_screen(
         // Compute caret index from movie coords, using the appropriate font.
         let caret_idx = match &snapshot {
             MemberSnapshot::Field { text, font, font_size, font_id, alignment,
-                                    fixed_line_space, top_spacing, word_wrap: _ } => {
+                                    fixed_line_space, top_spacing, word_wrap: _ } => 'field: {
                 // Mirror the renderer: rasterise the font at the SAME scaled
                 // size the PFR atlas uses (`font_size * stage_scale`), AND
                 // use the SAME font-lookup path as the renderer so we get
@@ -453,7 +503,23 @@ pub(crate) fn set_caret_at_screen(
                             .and_then(|fr| player.font_manager.fonts.get(&fr).cloned())
                     })
                 });
-                let Some(f) = font_opt else { return false };
+                let Some(f) = font_opt else {
+                    // No bitmap font for this face: the field is drawn by the
+                    // browser (Canvas2D), so measure it the same way.
+                    let line_h = if *fixed_line_space > 0 {
+                        *fixed_line_space as i32
+                    } else {
+                        ((*font_size as f64) * 1.2).round() as i32
+                    };
+                    match native_xy_to_caret_index(
+                        text, font, *font_size, line_h,
+                        movie_x - sprite_loc_h,
+                        movie_y - sprite_loc_v - *top_spacing as i32,
+                    ) {
+                        Some(idx) => break 'field idx,
+                        None => return false,
+                    }
+                };
                 // Scale the click coords into the renderer's coordinate
                 // space too. movie_x is in unscaled movie space; the
                 // renderer's char_widths sum is in scaled space.
@@ -696,13 +762,14 @@ async fn player_key_down_inner(key: String, code: u16) -> Result<DatumRef, Scrip
                 return;
             }
 
+            let editable = sprite_text_is_editable(player, sprite_id);
             let sprite = player.movie.score.get_sprite(sprite_id);
             let member_ref = sprite.and_then(|s| s.member.clone());
             let member = member_ref.and_then(|r| player.movie.cast_manager.find_mut_member_by_ref(&r));
             let Some(member) = member else { return };
 
             match &mut member.member_type {
-                CastMemberType::Field(field) if field.editable => {
+                CastMemberType::Field(field) if editable => {
                     apply_text_edit(
                         &mut field.text,
                         &mut field.sel_start,
@@ -715,9 +782,7 @@ async fn player_key_down_inner(key: String, code: u16) -> Result<DatumRef, Scrip
                     player.text_selection_start = field.sel_start.max(0) as u16;
                     player.text_selection_end = field.sel_end.max(0) as u16;
                 }
-                CastMemberType::Text(text_member)
-                    if text_member.info.as_ref().map_or(false, |i| i.editable) =>
-                {
+                CastMemberType::Text(text_member) if editable => {
                     apply_text_edit(
                         &mut text_member.text,
                         &mut text_member.sel_start,

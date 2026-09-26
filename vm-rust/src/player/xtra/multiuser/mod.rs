@@ -414,8 +414,13 @@ impl MultiuserXtraManager {
                     let mut multiusr_manager =
                         unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                     if let Some(instance) = multiusr_manager.instances.get_mut(&instance_id) {
+                        // Report a dropped connection the way the Director Xtra
+                        // does: an error that getNetErrorString describes as
+                        // "There is no current connection". The WebSocket close
+                        // code (1000/1006) meant nothing to movies — ROTL keys its
+                        // "You have lost your connection" handling on that text.
                         instance.dispatch_message(MultiuserMessage {
-                            error_code: e.code() as i32,
+                            error_code: -5,
                             recipients: vec![],
                             sender_id: "System".to_string(),
                             subject: "DisconnectFromServer".to_string(),
@@ -566,10 +571,26 @@ impl MultiuserXtraManager {
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                 reserve_player_mut(|player| {
                     // multiuser_log!("sendNetMessage: {:?}", msg_string);
+                    // Director accepts two forms:
+                    //   sendNetMessage(recipients, subject, content)
+                    //   sendNetMessage([#recipients: r, #subject: s, #content: c])
+                    // Resolve both to the same three datums; a missing one is VOID.
+                    let (recipients_ref, subject_ref, content_ref) = match (args.len(), args.get(0).map(|d| player.get_datum(d))) {
+                        (1, Some(Datum::PropList(pairs, _))) => {
+                            let find = |name: &str| pairs.iter()
+                                .find(|(k, _)| player.get_datum(k).string_value().is_ok_and(|s| s.eq_ignore_ascii_case(name)))
+                                .map(|(_, v)| v.clone());
+                            (find("recipients"), find("subject"), find("content"))
+                        }
+                        _ => (args.get(0).cloned(), args.get(1).cloned(), args.get(2).cloned()),
+                    };
                     if let Some(tx) = &instance.socket_tx {
                         let msg_bytes = match instance.connection_mode {
                             MultiuserConnectionMode::Text => {
-                                let msg_data = player.get_datum(args.get(2).unwrap());
+                                let Some(content_ref) = &content_ref else {
+                                    return Err(ScriptError::new("sendNetMessage: missing content".to_string()));
+                                };
+                                let msg_data = player.get_datum(content_ref);
                                 let s = msg_data.string_value()?;
                                 // Mirror of the receive side: a Unicode Director's
                                 // Multiuser Xtra puts UTF-8 on the wire. Truncating
@@ -579,13 +600,23 @@ impl MultiuserXtraManager {
                                 s.into_bytes()
                             }
                             MultiuserConnectionMode::Binary => {
-                                let subject = player.get_datum(args.get(1).unwrap()).string_value()?;
-                                let msg_data = player.get_datum(args.get(2).unwrap());
-                                let content = StaticDatum::from(msg_data);
-                                let recipients_list = match player.get_datum(args.get(0).unwrap()) {
+                                let Some(subject_ref) = &subject_ref else {
+                                    return Err(ScriptError::new("sendNetMessage: missing subject".to_string()));
+                                };
+                                let subject = player.get_datum(subject_ref).string_value()?;
+                                let content = match &content_ref {
+                                    Some(r) => StaticDatum::from(player.get_datum(r)),
+                                    None => StaticDatum::Void,
+                                };
+                                let void = Datum::Void;
+                                let recipients_datum = match &recipients_ref {
+                                    Some(r) => player.get_datum(r),
+                                    None => &void,
+                                };
+                                let recipients_list = match recipients_datum {
                                     Datum::List(_, list, ..) => list.iter().map(|d| player.get_datum(d).string_value().unwrap_or_default()).collect_vec(),
                                     Datum::String(s) => vec![s.clone()],
-                                    Datum::Int(0) => vec![],
+                                    Datum::Int(0) | Datum::Void => vec![],
                                     _ => return Err(ScriptError::new("Invalid recipients argument, expected list or string".to_string())),
                                 };
 
@@ -646,7 +677,7 @@ impl MultiuserXtraManager {
                     -2 => "Connection refused",
                     -3 => "Connection timed out",
                     -4 => "Invalid message",
-                    -5 => "Not connected",
+                    -5 => "There is no current connection.",
                     _ => "Unknown error",
                 };
                 reserve_player_mut(|player| {

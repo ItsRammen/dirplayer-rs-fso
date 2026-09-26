@@ -2884,8 +2884,19 @@ impl WebGL2Renderer {
                     // if they happen to be the focus owner (e.g. Coke Studios'
                     // `nav_v-ego_search_motto` is a non-editable text panel that
                     // would otherwise show a caret at the end of the motto text).
-                    let has_focus = field_member.editable
-                        && player.keyboard_focus_sprite == channel_num;
+                    // A read-only field shows a selection made by `hilite`
+                    // (list fields: ROTL's Who's Online, friends and guild
+                    // lists hilite the clicked line) whether or not it has
+                    // focus. With a selection there's no caret to draw, so
+                    // treating it as focused only paints the highlight.
+                    // `the editable of sprite` counts as much as the member's
+                    // own flag (ROTL's profile bio is editable per sprite).
+                    let editable = field_member.editable
+                        || player.movie.score.get_sprite(channel_num).map_or(false, |s| s.editable);
+                    let has_focus = (editable
+                        && player.keyboard_focus_sprite == channel_num)
+                        || (!editable
+                            && field_member.sel_start != field_member.sel_end);
 
                     let mut style = 0u8;
                     let style_lc = field_member.font_style.to_lowercase();
@@ -2921,8 +2932,10 @@ impl WebGL2Renderer {
                         .get_cast(member_ref.cast_lib as u32)
                         .map(|cl| cl.font_table.clone())
                         .unwrap_or_default();
+                    // Runs re-aligned to the text as scripts have edited it.
+                    let field_runs = field_member.current_runs();
                     let field_styled_spans: Option<Vec<crate::player::handlers::datum_handlers::cast_member::font::StyledSpan>>
-                        = if field_member.formatting_runs.len() >= 2 {
+                        = if field_runs.len() >= 2 {
                         use crate::player::handlers::datum_handlers::cast_member::font::{StyledSpan, HtmlStyle};
                         let text_str = &field_member.text;
                         // STXT formatting_runs use BYTE positions in
@@ -2947,7 +2960,7 @@ impl WebGL2Renderer {
                             0
                         };
                         let mut spans: Vec<StyledSpan> = Vec::new();
-                        let runs = &field_member.formatting_runs;
+                        let runs: &[_] = &field_runs;
                         // Detect whether the runs actually carry non-trivial
                         // per-run sizes (≥6pt and at least one differing from
                         // the member default). Director STXT runs that just
@@ -3142,8 +3155,20 @@ impl WebGL2Renderer {
                     // time scrollTop changes. Force keep_authored_height so
                     // the bitmap stays at sprite height instead of shrinking
                     // to fit the scrolled-up content.
-                    let scroll_top_i = field_member.scroll_top as i32;
-                    let effective_top_spacing = (field_member.top_spacing as i32 - scroll_top_i)
+                    // Director keeps scrollTop within the text: a field whose
+                    // saved scroll is past the end of new, shorter text shows
+                    // from the top rather than scrolled into empty space.
+                    let scroll_top_i = match &scrollbar_info {
+                        Some((sb, _)) => (field_member.scroll_top as i32).clamp(0, sb.max_scroll.max(0)),
+                        None => field_member.scroll_top as i32,
+                    };
+                    // Director insets field text by the border plus the
+                    // margin ("gutter"); FieldInfo counts both in the member
+                    // height, but the text was drawn flush with the top, so
+                    // ROTL's 16px login boxes showed their text riding up
+                    // over the box edge.
+                    let text_inset = field_member.border as i32 + field_member.margin as i32;
+                    let effective_top_spacing = (field_member.top_spacing as i32 - scroll_top_i + text_inset)
                         .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
                     let scroll_active = scroll_top_i != 0;
 
@@ -3189,6 +3214,12 @@ impl WebGL2Renderer {
                     );
                     cache_key.keep_authored_height = transform_active || scroll_active || box_clipped;
                     cache_key.transform_active = transform_active;
+                    // Per-run colour/style changes alone (same text) must
+                    // re-rasterize too.
+                    cache_key.styled_spans_hash = field_styled_spans
+                        .as_deref()
+                        .map(RenderedTextCacheKey::hash_styled_spans)
+                        .unwrap_or(0);
 
                     TextureSource::RenderedText {
                         cache_key,
@@ -3465,16 +3496,27 @@ impl WebGL2Renderer {
         let palettes = player.movie.cast_manager.palettes();
         // Sprite foreColor/backColor palette indices are resolved against the bitmap's palette,
         // so they work together correctly (e.g., index 248/255 in a custom 256-color palette).
+        // A 16/32-bit image has no palette of its own (a runtime `new(#bitmap)` reports
+        // #grayscale), so there the indices go through the movie's current palette, as
+        // Director does: ROTL keys its 16-bit map layers with ink 36 on backColor 83,
+        // green only in the movie's own palette.
+        let sprite_color_palette_ref = if bitmap_bit_depth > 8
+            && matches!(texture_source, TextureSource::Bitmap { .. })
+        {
+            player.movie.score.get_frame_palette(player.movie.current_frame)
+        } else {
+            bitmap_palette_ref.clone()
+        };
         let bg_color_rgb = resolve_color_ref(
             &palettes,
             &bg_color,
-            &bitmap_palette_ref,
+            &sprite_color_palette_ref,
             bitmap_bit_depth,
         );
         let fg_color_rgb = resolve_color_ref(
             &palettes,
             &fg_color,
-            &bitmap_palette_ref,
+            &sprite_color_palette_ref,
             bitmap_bit_depth,
         );
 
@@ -7619,7 +7661,17 @@ impl WebGL2Renderer {
                     cache_key.sel_end,
                 );
                 let cy = top_spacing as i32 + dy;
-                text_bitmap.fill_rect(dx, cy, dx + 1, cy + font.char_height as i32, (0, 0, 0), &palettes, 1.0);
+                // Draw the caret in the text colour, as Director does. A fixed
+                // black caret vanishes in light-on-dark fields such as ROTL's
+                // login boxes (white text, background-transparent ink over a
+                // black stage).
+                let caret_rgb = resolve_color_ref(
+                    &palettes,
+                    fg_color,
+                    &PaletteRef::BuiltIn(get_system_default_palette()),
+                    8,
+                );
+                text_bitmap.fill_rect(dx, cy, dx + 1, cy + font.char_height as i32, caret_rgb, &palettes, 1.0);
             }
         }
 

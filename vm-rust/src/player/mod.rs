@@ -321,6 +321,12 @@ pub struct DirPlayer {
     pub last_mouse_down_time: i64,
     pub is_double_click: bool,
     pub mouse_down_sprite: i16,
+    /// Where `mouse_down_sprite` was when the button went down, to tell
+    /// whether the movie has since moved it (see MouseUp in commands.rs).
+    pub mouse_down_sprite_loc: (i32, i32),
+    /// Frame cycles completed; input handling waits on it like Director,
+    /// which processes clicks between frames, after exitFrame.
+    pub frame_cycles: u64,
     pub drag_offset: (i32, i32),
     /// In-progress drag of a `#scroll` field's lift: (sprite number, grab offset
     /// from the lift's top edge in local px). Cleared on mouse up.
@@ -519,6 +525,12 @@ pub struct DirPlayer {
     pub current_frame_tempo: u32,  // Cached tempo for the current frame
     pub has_player_frame_changed: bool,
     pub stage_dirty: bool, // Set when any sprite property changes; cleared after render
+    /// Where sprites were when the stage was last drawn, for the ones a
+    /// script has changed since. `intersects` and `within` compare these
+    /// drawn rects, as Director does: ROTL parks a proximity sprite on the
+    /// player, calls updateStage, hides it again, and only then asks whether
+    /// it intersects the NPC — the "close enough to give/trade" test.
+    pub drawn_rects: std::collections::HashMap<i16, (i32, i32, i32, i32)>,
     /// Set when an input handler (mouse or key) starts running, cleared once
     /// the next exitFrame has run. While it is set the stage is not redrawn:
     /// Director draws once per frame, after the handlers of that frame and
@@ -777,6 +789,8 @@ impl DirPlayer {
             last_mouse_down_time: 0,
             is_double_click: false,
             mouse_down_sprite: 0,
+            mouse_down_sprite_loc: (0, 0),
+            frame_cycles: 0,
             drag_offset: (0, 0),
             field_scroll_drag: None,
             trails_bitmap: None,
@@ -843,6 +857,7 @@ impl DirPlayer {
             current_frame_tempo: 30,  // Default to 30 fps
             has_player_frame_changed: false,
             stage_dirty: true,
+            drawn_rects: std::collections::HashMap::new(),
             draw_hold_since_ms: None,
             preview_dirty: true,
             has_frame_changed_in_go: false,
@@ -2933,19 +2948,20 @@ impl DirPlayer {
                 // Field/Text member, or "" if none.
                 let s = if self.keyboard_focus_sprite >= 0 {
                     let sprite_id = self.keyboard_focus_sprite as i16;
+                    let editable = crate::player::keyboard_events::sprite_text_is_editable(self, sprite_id);
                     let sprite = self.movie.score.get_sprite(sprite_id);
                     let member = sprite
                         .and_then(|s| s.member.as_ref())
                         .and_then(|m| self.movie.cast_manager.find_member_by_ref(m));
                     match member.map(|m| &m.member_type) {
-                        Some(crate::player::cast_member::CastMemberType::Field(f)) if f.editable => {
+                        Some(crate::player::cast_member::CastMemberType::Field(f)) if editable => {
                             let len = f.text.len() as i32;
                             let lo = f.sel_start.min(f.sel_end).clamp(0, len);
                             let hi = f.sel_start.max(f.sel_end).clamp(0, len);
                             f.text[lo as usize..hi as usize].to_string()
                         }
                         Some(crate::player::cast_member::CastMemberType::Text(t))
-                            if t.info.as_ref().map_or(false, |i| i.editable) =>
+                            if editable =>
                         {
                             let len = t.text.len() as i32;
                             let lo = t.sel_start.min(t.sel_end).clamp(0, len);
@@ -2983,6 +2999,10 @@ impl DirPlayer {
             },
             BuiltInSymbol::MouseLine => {
                 let val = compute_mouse_line(self);
+                Ok(self.alloc_datum(Datum::Int(val)))
+            },
+            BuiltInSymbol::MouseWord => {
+                let val = compute_mouse_word(self);
                 Ok(self.alloc_datum(Datum::Int(val)))
             },
             BuiltInSymbol::StillDown => { self.input_polled = true; Ok(self.alloc_datum(datum_bool(self.movie.mouse_down))) },
@@ -3431,6 +3451,10 @@ impl DirPlayer {
             }
             Some(BuiltInSymbol::MouseLine) => {
                 let val = compute_mouse_line(self);
+                Ok(self.alloc_datum(Datum::Int(val)))
+            }
+            Some(BuiltInSymbol::MouseWord) => {
+                let val = compute_mouse_word(self);
                 Ok(self.alloc_datum(Datum::Int(val)))
             }
             Some(BuiltInSymbol::MouseDown) => { self.input_polled = true; Ok(self.alloc_datum(datum_bool(self.movie.mouse_down))) }
@@ -6545,6 +6569,55 @@ fn mouse_member_datum(player: &DirPlayer) -> Datum {
     }
 }
 
+/// `the mouseWord`: the 1-based number of the word under the pointer in a
+/// field or text sprite, or -1 when the pointer isn't over a word (between
+/// words, past the text, or over a non-text sprite). Words are Lingo words:
+/// runs of characters separated by spaces, tabs and line breaks.
+fn compute_mouse_word(player: &mut DirPlayer) -> i32 {
+    let (mx, my) = player.mouse_loc;
+    let sprite_num = match score::get_sprite_at(player, mx, my, false) {
+        Some(n) => n as i16,
+        None => return -1,
+    };
+    let char_idx = compute_char_at(player, sprite_num, mx, my);
+    if char_idx < 1 {
+        return -1;
+    }
+    let text = match player
+        .movie
+        .score
+        .get_sprite(sprite_num)
+        .and_then(|s| s.member.as_ref())
+        .and_then(|r| player.movie.cast_manager.find_member_by_ref(r))
+        .map(|m| &m.member_type)
+    {
+        Some(CastMemberType::Field(f)) => f.text.clone(),
+        Some(CastMemberType::Text(t)) => t.text.clone(),
+        _ => return -1,
+    };
+    word_number_at_char(&text, char_idx as usize)
+}
+
+/// 1-based word number containing the 1-based character `char_idx`, or -1 if
+/// that character is whitespace or out of range.
+fn word_number_at_char(text: &str, char_idx: usize) -> i32 {
+    let is_space = |c: char| c == ' ' || c == '\t' || c == '\r' || c == '\n';
+    let mut word = 0;
+    let mut in_word = false;
+    for (i, c) in text.chars().enumerate() {
+        if is_space(c) {
+            in_word = false;
+        } else if !in_word {
+            in_word = true;
+            word += 1;
+        }
+        if i + 1 == char_idx {
+            return if is_space(c) { -1 } else { word };
+        }
+    }
+    -1
+}
+
 fn compute_mouse_char(player: &mut DirPlayer) -> i32 {
     let (mx, my) = player.mouse_loc;
     let sprite_num = match score::get_sprite_at(player, mx, my, false) {
@@ -6587,7 +6660,7 @@ pub fn compute_char_at(player: &mut DirPlayer, sprite_num: i16, mx: i32, my: i32
                 f.text.clone(), f.fixed_line_space, f.top_spacing,
                 f.width as i32, f.scroll_top as i32, f.word_wrap,
                 f.font.clone(), f.font_size,
-                f.formatting_runs.clone(), false,
+                f.current_runs().into_owned(), false,
             ),
             CastMemberType::Text(t) => (
                 t.text.clone(), t.fixed_line_space, t.top_spacing,
@@ -7004,6 +7077,7 @@ pub async fn run_frame_loop() {
         // Run one frame cycle (scripts + advance)
         let (playing, _) = run_single_frame().await;
         is_playing = playing;
+        reserve_player_mut(|player| player.frame_cycles = player.frame_cycles.wrapping_add(1));
 
         if !is_playing {
             stop_movie_sequence().await;

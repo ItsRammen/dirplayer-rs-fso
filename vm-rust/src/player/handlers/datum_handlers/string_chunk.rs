@@ -416,7 +416,8 @@ impl StringChunkUtils {
                 new_string.replace_range(byte_start..byte_end, replace_with);
                 Ok(new_string)
             }
-            StringChunkType::Item | StringChunkType::Word | StringChunkType::Line => {
+            StringChunkType::Line => Ok(put_line_chunk(string, chunk_expr, replace_with, LinePut::Into)),
+            StringChunkType::Item | StringChunkType::Word => {
                 let chunk_list = StringChunkUtils::resolve_chunk_list(
                     string,
                     chunk_expr.chunk_type.clone(),
@@ -437,7 +438,6 @@ impl StringChunkUtils {
                 let delimiter = match chunk_expr.chunk_type {
                     StringChunkType::Item => chunk_expr.item_delimiter.to_string(),
                     StringChunkType::Word => " ".to_string(),
-                    StringChunkType::Line => "\r\n".to_string(),
                     _ => unreachable!(),
                 };
                 Ok(new_chunks.join(&delimiter))
@@ -458,7 +458,8 @@ impl StringChunkUtils {
                 new_string.insert_str(start, insert_value);
                 Ok(new_string)
             }
-            StringChunkType::Item | StringChunkType::Word | StringChunkType::Line => {
+            StringChunkType::Line => Ok(put_line_chunk(string, chunk_expr, insert_value, LinePut::Before)),
+            StringChunkType::Item | StringChunkType::Word => {
                 let chunk_list = StringChunkUtils::resolve_chunk_list(
                     string,
                     chunk_expr.chunk_type.clone(),
@@ -488,7 +489,6 @@ impl StringChunkUtils {
                 let delimiter = match chunk_expr.chunk_type {
                     StringChunkType::Item => chunk_expr.item_delimiter.to_string(),
                     StringChunkType::Word => " ".to_string(),
-                    StringChunkType::Line => "\r\n".to_string(),
                     _ => unreachable!(),
                 };
                 Ok(new_chunks.join(&delimiter))
@@ -509,7 +509,8 @@ impl StringChunkUtils {
                 new_string.insert_str(end, insert_value);
                 Ok(new_string)
             }
-            StringChunkType::Item | StringChunkType::Word | StringChunkType::Line => {
+            StringChunkType::Line => Ok(put_line_chunk(string, chunk_expr, insert_value, LinePut::After)),
+            StringChunkType::Item | StringChunkType::Word => {
                 let chunk_list = StringChunkUtils::resolve_chunk_list(
                     string,
                     chunk_expr.chunk_type.clone(),
@@ -540,7 +541,6 @@ impl StringChunkUtils {
                 let delimiter = match chunk_expr.chunk_type {
                     StringChunkType::Item => chunk_expr.item_delimiter.to_string(),
                     StringChunkType::Word => " ".to_string(),
-                    StringChunkType::Line => "\r\n".to_string(),
                     _ => unreachable!(),
                 };
                 Ok(new_chunks.join(&delimiter))
@@ -1202,20 +1202,54 @@ fn resolve_delimited_char_range_single(
 /// Line-chunk char range. Mirrors `string_get_lines`: detects a single line
 /// break style per text (\r\n, \n, or \r). Returns the char range that would
 /// be selected by `line[start..end]` in Director semantics.
+enum LinePut {
+    Into,
+    Before,
+    After,
+}
+
+/// `put ... into/before/after line N of s`. Edits that line's characters in
+/// place, so the text keeps its own line breaks (CR or CRLF). Rejoining every
+/// line with CRLF turned a RETURN-separated field into mixed text. A line
+/// past the end is created with RETURNs first, as in Director.
+fn put_line_chunk(string: &str, chunk_expr: &StringChunkExpr, value: &str, mode: LinePut) -> String {
+    let line_count = if string.is_empty() { 0 } else { string_get_lines(string).len() };
+    // 0-based target line; -30000 is the compiler's "last line".
+    let first = if chunk_expr.start <= -30000 {
+        line_count.saturating_sub(1)
+    } else {
+        (chunk_expr.start.max(1) - 1) as usize
+    };
+    if first >= line_count {
+        let wanted = first + 1;
+        let pad = if line_count == 0 { wanted - 1 } else { wanted - line_count };
+        return format!("{}{}{}", string, "\r".repeat(pad), value);
+    }
+    let (cs, ce) = resolve_line_char_range(string, chunk_expr.start, chunk_expr.end);
+    let (bs, be) = char_range_to_byte_range(string, cs, ce);
+    let mut out = string.to_owned();
+    match mode {
+        LinePut::Into => out.replace_range(bs..be, value),
+        LinePut::Before => out.insert_str(bs, value),
+        LinePut::After => out.insert_str(be, value),
+    }
+    out
+}
+
 fn resolve_line_char_range(text: &str, start: i32, end: i32) -> (usize, usize) {
     let total_chars = text.chars().count();
     if text.is_empty() {
         return (0, 0);
     }
-    let contains_crlf = text.contains("\r\n");
-    let contains_lf = !contains_crlf && text.contains('\n');
-    // contains_cr true when neither of the above match
+    // Same rule as `string_get_lines`: every RETURN breaks (a CRLF pair is one
+    // break), and LF breaks only in text with no RETURN at all.
+    let has_cr = text.contains('\r');
     let mut segments: Vec<(usize, usize)> = Vec::new();
     let mut seg_start = 0usize;
     let mut idx = 0usize;
     let mut prev_was_cr = false;
     for ch in text.chars() {
-        let is_break = if contains_crlf {
+        let is_break = if has_cr {
             // Treat \r\n as a single break: end the line on \r, then skip \n.
             if prev_was_cr && ch == '\n' {
                 seg_start = idx + 1;
@@ -1225,10 +1259,8 @@ fn resolve_line_char_range(text: &str, start: i32, end: i32) -> (usize, usize) {
             }
             prev_was_cr = ch == '\r';
             ch == '\r'
-        } else if contains_lf {
-            ch == '\n'
         } else {
-            ch == '\r'
+            ch == '\n'
         };
         if is_break {
             segments.push((seg_start, idx));
@@ -1373,5 +1405,43 @@ mod chunk_write_tests {
     fn a_range_inside_keeps_both_sides() {
         assert_eq!(StringChunkUtils::string_by_putting_into_chunk("ABCDEFGH", &chars(3, 5), "xy").unwrap(), "ABxyFGH");
         assert_eq!(StringChunkUtils::string_by_putting_into_chunk("ABCDEFGHIJKLMNOP", &chars(1, 10), "4 x 8").unwrap(), "4 x 8KLMNOP");
+    }
+}
+
+#[cfg(test)]
+mod line_chunk_tests {
+    use super::*;
+    use crate::player::handlers::datum_handlers::string::string_get_lines;
+
+    fn line(n: i32) -> StringChunkExpr {
+        StringChunkExpr { chunk_type: StringChunkType::Line, start: n, end: 0, item_delimiter: ',' }
+    }
+
+    #[test]
+    fn mixed_cr_and_crlf_count_every_return() {
+        let text = "\r* Welcome\r\n* Server\r[1] Jim\r[2] Me";
+        assert_eq!(string_get_lines(text), vec!["", "* Welcome", "* Server", "[1] Jim", "[2] Me"]);
+        let (s, e) = StringChunkHandlers::resolve_chunk_char_range(text, &line(4));
+        assert_eq!(&text[s..e], "[1] Jim");
+    }
+
+    #[test]
+    fn put_into_a_line_keeps_the_other_breaks() {
+        let out = StringChunkUtils::string_by_putting_into_chunk("a\rb\rc", &line(2), "X").unwrap();
+        assert_eq!(out, "a\rX\rc");
+        let out = StringChunkUtils::string_by_putting_into_chunk("a\r\nb", &line(1), "X").unwrap();
+        assert_eq!(out, "X\r\nb");
+    }
+
+    #[test]
+    fn put_past_the_last_line_pads_with_returns() {
+        let out = StringChunkUtils::string_by_putting_into_chunk("a", &line(3), "X").unwrap();
+        assert_eq!(out, "a\r\rX");
+    }
+
+    #[test]
+    fn put_before_and_after_a_line() {
+        assert_eq!(StringChunkUtils::string_by_putting_before_chunk("a\rb", &line(2), "X").unwrap(), "a\rXb");
+        assert_eq!(StringChunkUtils::string_by_putting_after_chunk("a\rb", &line(1), "X").unwrap(), "aX\rb");
     }
 }

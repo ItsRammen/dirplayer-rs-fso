@@ -1,0 +1,73 @@
+name: ROTL polyfill release
+
+# Builds the dirplayer polyfill from the `rotl` branch and attaches it to a
+# GitHub Release. Push a tag named rotl-v* (e.g. rotl-v2) to publish one.
+#
+# Only the VM and the polyfill bundle are built — ROTL uses neither Ruffle nor
+# the plugin Xtras, and the upstream `build-all` takes tens of minutes. The
+# bundle is a single file with the wasm inlined, so that file is the release.
+
+on:
+  push:
+    tags: ['rotl-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vm-rust
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install NPM dependencies
+        run: npm ci
+
+      - name: Build VM and polyfill
+        run: |
+          npm run build-vm
+          npm run build-polyfill
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dirplayer-polyfill-rotl
+          path: dist-polyfill/dirplayer-polyfill.js
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/rotl-v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          sha=$(sha256sum dist-polyfill/dirplayer-polyfill.js | cut -d' ' -f1)
+          gh release create "$TAG" dist-polyfill/dirplayer-polyfill.js \
+            --title "ROTL polyfill $TAG" \
+            --notes "dirplayer polyfill built from the \`rotl\` branch at ${GITHUB_SHA::12}.
+
+          sha256: \`$sha\`
+
+          Drop \`dirplayer-polyfill.js\` into the polyfill folder the ROTL page serves (dirplayer-polyfill-rotl)."
