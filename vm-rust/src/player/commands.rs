@@ -1298,11 +1298,14 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 get_sprite_at(player, x, y, true)
             });
             if let Some(sprite_number) = scripted_sprite {
-                player_dispatch_event_to_sprite_targeted(
+                // Behaviors, then the cast member's own script, then frame and
+                // movie: ROTL's shop list is a bitmap whose right-click (item
+                // info) is a member script, which the behavior-only dispatch
+                // never reached.
+                crate::player::events::player_dispatch_sprite_mouse_event(
                     Symbol::builtin(BuiltInSymbol::RightMouseDown),
-                    &vec![],
                     sprite_number as u16,
-                ).await;
+                ).await?;
             } else {
                 player_invoke_frame_and_movie_scripts(
                     Symbol::builtin(BuiltInSymbol::RightMouseDown),
@@ -1318,11 +1321,14 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 get_sprite_at(player, x, y, true)
             });
             if let Some(sprite_number) = scripted_sprite {
-                player_dispatch_event_to_sprite_targeted(
+                // Behaviors, then the cast member's own script, then frame and
+                // movie: ROTL's shop list is a bitmap whose right-click (item
+                // info) is a member script, which the behavior-only dispatch
+                // never reached.
+                crate::player::events::player_dispatch_sprite_mouse_event(
                     Symbol::builtin(BuiltInSymbol::RightMouseUp),
-                    &vec![],
                     sprite_number as u16,
-                ).await;
+                ).await?;
             } else {
                 player_invoke_frame_and_movie_scripts(
                     Symbol::builtin(BuiltInSymbol::RightMouseUp),
