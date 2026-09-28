@@ -2338,7 +2338,9 @@ pub fn render_score_to_bitmap_with_offset(
                     let has_selection = is_focused && sel_lo != sel_hi;
                     // Same line stride bitmap.draw_text_wrapped uses internally.
                     let line_h = font.char_height as i32 + field_member.fixed_line_space as i32;
-                    let wrap_w = if field_member.word_wrap { sprite.width } else { 0 };
+                    // Wrap at the field's drawn width (never narrower than its member;
+                    // see get_concrete_sprite_rect), not the score channel's raw width.
+                    let wrap_w = if field_member.word_wrap { get_concrete_sprite_rect(player, sprite).width() } else { 0 };
 
                     if has_selection {
                         draw_text_selection_rects(

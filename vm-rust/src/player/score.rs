@@ -6249,9 +6249,14 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             // from the authored field.width + the field's own chrome
             // settings gives a consistent, Director-faithful result.
             //
-            // Other boxTypes (#scroll, #fixed, #limit) honor
-            // sprite.width unconditionally — those are user-resizable
-            // containers independent of the member's authored width.
+            // #fixed and #limit honor sprite.width, but never draw
+            // narrower than the member's own box: Director can't shrink
+            // a field sprite below its member rect (resizing the sprite
+            // resizes the member). ROTL's chat entry ("sendchat",
+            // #limit, 780 wide) sits in a narrower score channel; drawn
+            // at that width it wrapped about 60% of the way along while
+            // Lingo (charPosToLoc, lineCount) laid it out on one 780px
+            // line, as Director did.
             let is_adjust_for_width = field_member.box_type == crate::player::symbols::builtin::BuiltInSymbol::Adjust;
             let member_authored_w = field_member.width as i32;
             let chrome_w = (2 * field_member.border as i32)
@@ -6277,6 +6282,8 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 // it is not stated in the Scripting Dictionary, and the 168 above
                 // is what pins it.
                 member_authored_w + chrome_w + FIELD_SCROLLBAR_WIDTH
+            } else if member_authored_w > 0 {
+                sprite.width.max(member_authored_w + chrome_w)
             } else {
                 sprite.width
             };

@@ -1260,6 +1260,32 @@ pub fn paste_text_into_focused_field(text: String) {
         let sprite = player.movie.score.get_sprite(sprite_id);
         let editable = crate::player::keyboard_events::sprite_text_is_editable(player, sprite_id);
         let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else { return };
+        // A #limit field takes only as much of the paste as fits its box.
+        let limit_field = match player.movie.cast_manager.find_member_by_ref(&member_ref).map(|m| &m.member_type) {
+            Some(CastMemberType::Field(f)) if editable
+                && f.box_type == crate::player::symbols::builtin::BuiltInSymbol::Limit => Some(f.clone()),
+            _ => None,
+        };
+        let text = match limit_field {
+            Some(base) => {
+                let chars: Vec<char> = text.chars().collect();
+                let fits = |n: usize| {
+                    let mut f = base.clone();
+                    crate::player::keyboard_events::apply_text_insertion(
+                        &mut f.text, &mut f.sel_start, &mut f.sel_end, &mut f.sel_anchor,
+                        &chars[..n].iter().collect::<String>());
+                    crate::player::keyboard_events::limit_field_fits(player, &f)
+                };
+                // Longest prefix that fits (fitting shrinks as the prefix grows).
+                let (mut lo, mut hi) = (0usize, chars.len());
+                while lo < hi {
+                    let mid = (lo + hi + 1) / 2;
+                    if fits(mid) { lo = mid } else { hi = mid - 1 }
+                }
+                chars[..lo].iter().collect::<String>()
+            }
+            None => text,
+        };
         let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else {
             return;
         };
