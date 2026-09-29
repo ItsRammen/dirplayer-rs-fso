@@ -583,6 +583,12 @@ impl FontMemberHandlers {
                     let line_w = ctx.measure_text(&current).map(|m| m.width()).unwrap_or(0.0);
                     total_width = total_width.max(line_w);
                     line_count += 1;
+                } else {
+                    // A line of only spaces has no words but still takes a
+                    // line. ROTL's chat field starts with one (" "), and
+                    // dropping it measured the log a line short, so
+                    // scrollByLine(9000) stopped above the newest message.
+                    line_count += 1;
                 }
             } else {
                 let line_w = ctx.measure_text(raw).map(|m| m.width()).unwrap_or(0.0);
