@@ -6829,8 +6829,20 @@ pub fn compute_char_at(player: &mut DirPlayer, sprite_num: i16, mx: i32, my: i32
         // Visual lines as (start_idx_inclusive, end_idx_exclusive, line_h)
         let mut visual_lines: Vec<(usize, usize, i32)> = Vec::new();
         let mut line_max_size: i32 = base_size;
+        // fixedLineSpace is the ABSOLUTE height of each line (see draw_text),
+        // not extra leading; without one a bitmap font steps by its glyph
+        // cell. A taller run on the line still makes the line taller.
+        let cell_h = if line_spacing > 0 {
+            line_spacing as i32
+        } else {
+            crate::player::font::default_line_height(&font) as i32
+        };
         let finalize_line = |start: usize, end: usize, max_size: i32, lines: &mut Vec<(usize, usize, i32)>, line_y: &mut i32| {
-            let line_h = max_size.max(base_size).max(1);
+            let line_h = if line_spacing > 0 {
+                cell_h.max(max_size).max(1)
+            } else {
+                (max_size.max(base_size) * cell_h / base_size.max(1)).max(1)
+            };
             lines.push((start, end, line_h));
             *line_y += line_h;
         };
@@ -6917,8 +6929,12 @@ pub fn compute_char_at(player: &mut DirPlayer, sprite_num: i16, mx: i32, my: i32
                 font.char_height
             };
             (Some(lh), 0u16)
+        } else if line_spacing > 0 {
+            // A field's fixedLineSpace is the absolute per-line height, not
+            // leading added to the glyph cell (renderer and measure_text agree).
+            (Some(line_spacing), 0u16)
         } else {
-            (None, line_spacing)
+            (None, 0u16)
         };
         let params = crate::player::font::DrawTextParams {
             font: &font,
