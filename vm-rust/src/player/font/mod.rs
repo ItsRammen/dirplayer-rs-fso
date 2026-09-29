@@ -1946,12 +1946,30 @@ pub fn measure_text_wrapped(
     (max_width_found, height)
 }
 
+/// The per-line step a field is drawn at when it sets no `fixedLineSpace`.
+///
+/// A bitmap (PFR) font is drawn a whole glyph cell apart (`draw_text` and
+/// `draw_text_wrapped` step by `char_height`: 16 for Arial 12), so hit-testing
+/// and character positions must step by the cell too. Using the nominal size
+/// (12) made `the mouseLine` and `the mouseChar` drift further from the pointer
+/// with every line: in ROTL's teleport list, clicking the 6th of 12 rows
+/// selected the 9th. Fonts without a glyph atlas keep their nominal size.
+pub fn default_line_height(font: &BitmapFont) -> u16 {
+    if font.char_widths.is_some() && font.char_height > 0 {
+        font.char_height
+    } else if font.font_size > 0 {
+        font.font_size
+    } else {
+        font.char_height
+    }
+}
+
 pub fn get_text_char_pos(text: &str, params: &DrawTextParams, char_index: usize) -> (i16, i16) {
     let mut x: i16 = 0;
     let mut y = params.top_spacing;
     let mut line_width: i16 = 0;
     let mut line_index = 0;
-    let eff_lh = if params.font.font_size > 0 { params.font.font_size } else { params.font.char_height };
+    let eff_lh = default_line_height(params.font);
     // Match the renderer's line_step (no +1) — see comment in
     // get_text_index_at_pos for the line-by-line drift it causes.
     let line_step = params.line_height.unwrap_or(eff_lh) as i16
@@ -2092,7 +2110,7 @@ pub fn get_text_char_pos(text: &str, params: &DrawTextParams, char_index: usize)
 }
 
 pub fn get_text_index_at_pos(text: &str, params: &DrawTextParams, x: i32, y: i32) -> usize {
-    let eff_lh = if params.font.font_size > 0 { params.font.font_size } else { params.font.char_height };
+    let eff_lh = default_line_height(params.font);
     let line_h = params.line_height.unwrap_or(eff_lh) as i32;
     // line_step must match the renderer's per-line vertical advance
     // (measure_text_wrapped uses `effective_lh + line_spacing` with no
