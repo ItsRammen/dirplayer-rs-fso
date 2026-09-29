@@ -2196,12 +2196,28 @@ impl Bitmap {
         let mask_image = params.mask_image;
         // Sprite foreColor/backColor palette indices are resolved against the bitmap's palette,
         // so they work together correctly (e.g., index 248/255 in a custom 256-color palette).
-        let bg_color_resolved = resolve_color_ref(
-            palettes,
-            &params.bg_color,
-            &src.palette_ref,
-            src.original_bit_depth,
-        );
+        //
+        // Lingo's `image.copyPixels(..., [#bgColor: n])` is the exception. A palette
+        // index there names a colour in the DESTINATION image's palette, and source
+        // pixels are compared in that colour space, so one #bgColor keys the same
+        // colour whatever palette each source image carries. Resolving n in the
+        // source's own palette made it a different colour for every custom-palette
+        // image: ROTL's shop list copies each item icon with `#ink: 36, #bgcolor: 1`
+        // (cyan on the standard palette), and the 40 icons drawn with a custom
+        // palette (Golden Gun, the Moonlight and Apollo sets, ...) kept their cyan box.
+        let bg_from_destination = params.sprite.is_none()
+            && params.bg_color_explicit
+            && matches!(params.bg_color, ColorRef::PaletteIndex(_));
+        let bg_color_resolved = if bg_from_destination {
+            resolve_color_ref(palettes, &params.bg_color, &self.palette_ref, 8)
+        } else {
+            resolve_color_ref(
+                palettes,
+                &params.bg_color,
+                &src.palette_ref,
+                src.original_bit_depth,
+            )
+        };
 
         let fg_color_resolved = resolve_color_ref(
             palettes,
