@@ -148,16 +148,19 @@ pub(crate) fn scroll_member_by_lines(
             let chrome = 2 * f.border as i32 + 2 * f.margin as i32;
             let extras = chrome + 4 * f.box_drop_shadow as i32;
             let content = crate::player::score::measure_field_text_height(player, f, f.width as i32, extras).unwrap_or(0);
-            // The visible page is the hosting sprite's height, as `pageHeight`
-            // reports it — not the member's own height, which can be far
-            // smaller (ROTL's chat member is 48px tall, its sprite 153px, so
-            // clamping to the member left the newest lines pinned to the top).
+            // The visible page is what `pageHeight` reports: the field's
+            // authored box (FieldMember::authored_box_height), else the
+            // hosting sprite's height — not `height`, which tracks the text
+            // (ROTL's chat member reads 48px in a 153px box, so clamping to
+            // it left the newest lines pinned to the top).
             let frame = player.movie.current_frame;
             let sprite_h = player.movie.score.get_sorted_channels(frame).iter().find_map(|ch| {
                 (ch.sprite.member.as_ref() == Some(member_ref)).then(|| ch.sprite.height as i32)
             });
             let rect_h = (f.rect_bottom as i32 - f.rect_top as i32).max(0);
-            let raw = sprite_h.filter(|h| *h > 0).unwrap_or((f.height as i32).max(rect_h));
+            let raw = f.authored_box_height()
+                .or(sprite_h.filter(|h| *h > 0))
+                .unwrap_or((f.height as i32).max(rect_h));
             let page = (raw - chrome).max(1);
             Some((content - page).max(0))
         }

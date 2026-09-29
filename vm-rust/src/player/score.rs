@@ -6339,7 +6339,7 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 (member_box_h, "adjust+member-height")
             } else if field_member.word_wrap && is_adjust && field_member.text_height > 0 {
                 ((field_member.text_height as i32 + extras).max(member_box_h), "wrap+adjust+text_height")
-            } else if !is_adjust && (field_member.max_height as i32) > sprite.height {
+            } else if let Some(box_h) = field_member.authored_box_height() {
                 // Non-auto-sizing box types (#scroll / #fixed / #limit) take their
                 // height from the member's authored BOX, which lives in FieldInfo
                 // `max_height` — not in `initialRect`, whose bottom tracks the
@@ -6359,12 +6359,14 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 // here) instead of the authored box, and it fired on any movie
                 // whose text overflowed slightly, not just this one.
                 //
-                // Taking the larger of the two is deliberate: where the score
-                // carries a genuine authored height (talk.text: sprite 160 vs
-                // max_height 156) nothing changes. Whether Director adds the
-                // border/margin chrome on top of max_height is not established —
-                // no chrome is added here, which matches the observed 134.
-                ((field_member.max_height as i32).max(1), "non-adjust+authored-box")
+                // The member box wins over the score channel in both
+                // directions (see FieldMember::authored_box_height): ROTL's
+                // CombatLOG box is 153 but its channel says 1536. For
+                // Summer Resort's talk.text that means 156 rather than the
+                // channel's 160. Whether Director adds the border/margin
+                // chrome on top of max_height is not established — no chrome
+                // is added here, which matches the observed 134.
+                (box_h.max(1), "non-adjust+authored-box")
             } else if sprite.height > 0 {
                 (sprite.height, "sprite.height>0")
             } else if field_member.text_height > 0 {

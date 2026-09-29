@@ -372,6 +372,28 @@ fn realign_runs(
 }
 
 impl FieldMember {
+    /// Height of the box a `#fixed`, `#scroll` or `#limit` field shows on the
+    /// Stage, or `None` for `#adjust` (which grows with its text) and for a
+    /// field with no authored box.
+    ///
+    /// This is the MEMBER's box, not the hosting sprite's height. Director's
+    /// visible height for a field is `member.pageHeight`, a member property
+    /// ("the height ... of the area of the field cast member that is visible
+    /// on the Stage", Scripting Reference p.908), and the sprite `height`
+    /// property applies to bitmaps, shapes, vector shapes, Flash and video,
+    /// not fields (p.795). ROTL's "CombatLOG" is the case: its FieldInfo box is
+    /// 514x153, the same as the "chat" field it swaps with, but its score
+    /// channel says 1536 tall. Sizing it by the sprite drew ten times too many
+    /// lines, so `scrollByLine(9000)` never scrolled and the log spilled down
+    /// over the chat entry below it.
+    pub fn authored_box_height(&self) -> Option<i32> {
+        if self.box_type == BuiltInSymbol::Adjust || self.max_height == 0 {
+            None
+        } else {
+            Some(self.max_height as i32)
+        }
+    }
+
     /// The formatting runs aligned to the current text (see `runs_text`).
     pub fn current_runs(&self) -> std::borrow::Cow<'_, [crate::director::chunks::text::StxtFormattingRun]> {
         if self.runs_text == self.text {

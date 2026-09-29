@@ -385,8 +385,10 @@ impl FieldMemberHandlers {
                 // over-scrolls by ~1 line. Match Director's reported
                 // pageHeight which is the *text* area, not the sprite rect.
                 let chrome = 2 * (field.border as i32) + 2 * (field.margin as i32);
-                let raw = sprite_h
-                    .filter(|h| *h > 0)
+                // A fixed/scroll/limit field shows its own box whatever the
+                // sprite says (FieldMember::authored_box_height).
+                let raw = field.authored_box_height()
+                    .or(sprite_h.filter(|h| *h > 0))
                     .unwrap_or(field_height.max(rect_h));
                 Ok(Datum::Int((raw - chrome).max(1)))
             }
@@ -737,6 +739,8 @@ impl FieldMemberHandlers {
                         field_data.width = w;
                     }
                     if h > 0 {
+                        // Resizing the member resizes its box.
+                        field_data.max_height = h;
                         // Field BOX height — NOT line stride. The earlier
                         // assignment `fixed_line_space = h` clobbered the
                         // per-line stride with the box height (Coke Studios
@@ -800,6 +804,7 @@ impl FieldMemberHandlers {
                     // renderer place each glyph at the bottom of a tall
                     // cell. See `rect` setter above for the same bug fix.
                     field.height = h;
+                    field.max_height = h;
                     field.rect_bottom = field.rect_top.saturating_add(h as i16);
                     Ok(())
                 },
