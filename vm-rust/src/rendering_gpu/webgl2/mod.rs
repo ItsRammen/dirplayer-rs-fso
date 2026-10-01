@@ -6203,6 +6203,17 @@ impl WebGL2Renderer {
         // surfaces with a bogus fixed_line_space we'll address it at
         // the parser source rather than via runtime override.
 
+        // A #scroll field's scrollbar sits inside the right edge of the box,
+        // so centred and right-aligned text line up against the text area
+        // beside it, not the full box. Aligning to the full width put the end
+        // of each line under the scrollbar: ROTL's right-aligned friends list
+        // showed "Nai" of "Nainja".
+        let align_width = if scrollbar.is_some() {
+            width.saturating_sub(FIELD_SCROLLBAR_WIDTH as u32).max(1)
+        } else {
+            width
+        };
+
         // Compute alignment offset for bitmap font rendering (native text handles alignment internally).
         let mut bitmap_start_x = 0i32;
         if styled_spans.is_none() && !word_wrap {
@@ -6211,7 +6222,7 @@ impl WebGL2Renderer {
             } else {
                 measure_text(text, &font, None, render_line_spacing, top_spacing, bottom_spacing)
             };
-            let box_width = width as i32;
+            let box_width = align_width as i32;
             let line_width = line_width as i32;
             match alignment {
                 BuiltInSymbol::Center => bitmap_start_x = ((box_width - line_width) / 2).max(0),
@@ -6378,7 +6389,7 @@ impl WebGL2Renderer {
                 spans,
                 0,  // loc_h - render at origin
                 top_spacing as i32,  // loc_v
-                width as i32,
+                align_width as i32,
                 height as i32,
                 text_alignment,
                 wrap_width as i32,
@@ -6426,7 +6437,7 @@ impl WebGL2Renderer {
             // narrower `wrap_width` (e.g. field.width = 324) — see
             // `wrap_max_width` below. For non-field text the two are
             // equal so behavior is unchanged.
-            let max_width = width as i32;
+            let max_width = align_width as i32;
             let wrap_max_width = wrap_width as i32;
             // PFR strikes: anchor the first line so its baseline lands at the
             // strike's true ascent (Paige: baseline = lineTop + ascent), not at

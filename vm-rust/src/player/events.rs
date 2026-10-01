@@ -215,8 +215,10 @@ pub async fn player_dispatch_event_to_sprite_targeted(
     reserve_player_mut(|player| std::mem::replace(&mut player.event_stopped, prev_stopped))
 }
 
-/// See `PlayerVMEvent::SpriteMouse`.
-async fn player_dispatch_sprite_mouse_event(
+/// See `PlayerVMEvent::SpriteMouse`. Director's order for a sprite's mouse
+/// event: its behaviors, then its cast member's script, then the frame and
+/// movie scripts.
+pub async fn player_dispatch_sprite_mouse_event(
     name: Symbol,
     sprite_num: u16,
 ) -> Result<DatumRef, ScriptError> {

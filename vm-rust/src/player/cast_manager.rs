@@ -706,20 +706,35 @@ impl CastManager {
         }
     }
 
+    /// Remove a member and release its backing image unless Lingo still holds it.
     pub fn remove_member_with_ref(
         &mut self,
         member_ref: &CastMemberRef,
+        bitmap_manager: &mut BitmapManager,
     ) -> Result<(), ScriptError> {
+        if let Some(member) = self.take_member_with_ref(member_ref)? {
+            if let CastMemberType::Bitmap(bitmap) = member.member_type {
+                bitmap_manager.release_anchor(bitmap.image_ref);
+            }
+        }
+        Ok(())
+    }
+
+    /// Transfer a member out of its slot without releasing its image ownership.
+    pub fn take_member_with_ref(
+        &mut self,
+        member_ref: &CastMemberRef,
+    ) -> Result<Option<CastMember>, ScriptError> {
         if member_ref.cast_lib <= 0 || member_ref.cast_lib > self.casts.len() as i32 {
             return Err(ScriptError::new(
                 "Cannot remove member with invalid cast lib".to_string(),
             ));
         }
         let cast = self.get_cast_mut(member_ref.cast_lib as u32);
-        cast.remove_member(member_ref.cast_member as u32);
+        let removed = cast.remove_member(member_ref.cast_member as u32);
         self.invalidate_member_name_cache();
         self.queue_texture_invalidation(member_ref.clone());
-        Ok(())
+        Ok(removed)
     }
 
     /// Queue a cast-member ref to have its cached textures evicted from

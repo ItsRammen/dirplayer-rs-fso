@@ -682,6 +682,29 @@ pub(crate) fn apply_text_insertion(
 /// `player_dispatch_event_to_sprite_targeted` deliberately reads the flag back
 /// out after dispatching so mouseDown can skip the cast-member script when a
 /// behavior stopped the event, and clearing it deeper would break that.
+/// Whether a #limit field's text still fits its box: no more wrapped lines
+/// than the box has room for (at least one).
+pub(crate) fn limit_field_fits(player: &DirPlayer, field: &crate::player::cast_member::FieldMember) -> bool {
+    use crate::player::score::measure_field_text_height;
+    let box_h = if field.max_height > 0 {
+        field.max_height as i32
+    } else {
+        (field.rect_bottom - field.rect_top) as i32
+    };
+    if box_h <= 0 || field.width == 0 {
+        return true;
+    }
+    let chrome = 2 * field.border as i32 + 2 * field.margin as i32 + field.box_drop_shadow as i32;
+    let width = field.width as i32 + chrome;
+    let Some(height) = measure_field_text_height(player, field, width, chrome) else { return true };
+    let mut one_line = field.clone();
+    one_line.text = "X".to_string();
+    let line_h = measure_field_text_height(player, &one_line, width, chrome).unwrap_or(height).max(1);
+    let lines = (height + line_h / 2) / line_h;
+    let room = ((box_h + line_h / 2) / line_h).max(1);
+    lines <= room
+}
+
 pub async fn player_key_down(key: String, code: u16) -> Result<DatumRef, ScriptError> {
     crate::player::events::with_event_scope(player_key_down_inner(key, code)).await
 }
@@ -765,11 +788,14 @@ async fn player_key_down_inner(key: String, code: u16) -> Result<DatumRef, Scrip
             let editable = sprite_text_is_editable(player, sprite_id);
             let sprite = player.movie.score.get_sprite(sprite_id);
             let member_ref = sprite.and_then(|s| s.member.clone());
-            let member = member_ref.and_then(|r| player.movie.cast_manager.find_mut_member_by_ref(&r));
+            let member = member_ref.clone().and_then(|r| player.movie.cast_manager.find_mut_member_by_ref(&r));
             let Some(member) = member else { return };
+            // A #limit field whose edit grew its text: (the edited field, the state before).
+            let mut limit_check: Option<(crate::player::cast_member::FieldMember, (String, i32, i32, i32))> = None;
 
             match &mut member.member_type {
                 CastMemberType::Field(field) if editable => {
+                    let before = (field.text.clone(), field.sel_start, field.sel_end, field.sel_anchor);
                     apply_text_edit(
                         &mut field.text,
                         &mut field.sel_start,
@@ -779,6 +805,9 @@ async fn player_key_down_inner(key: String, code: u16) -> Result<DatumRef, Scrip
                         ctrl_or_meta,
                         shift,
                     );
+                    if field.box_type == BuiltInSymbol::Limit && field.text.chars().count() > before.0.chars().count() {
+                        limit_check = Some((field.clone(), before));
+                    }
                     player.text_selection_start = field.sel_start.max(0) as u16;
                     player.text_selection_end = field.sel_end.max(0) as u16;
                 }
@@ -796,6 +825,22 @@ async fn player_key_down_inner(key: String, code: u16) -> Result<DatumRef, Scrip
                     player.text_selection_end = text_member.sel_end.max(0) as u16;
                 }
                 _ => {}
+            }
+
+            // #limit ("Limit to Field Size"): typing stops once the text fills
+            // the field's box. ROTL's chat entry is one such line; the typed
+            // text must not wrap onto a line nobody can see.
+            if let Some((edited, before)) = limit_check {
+                if !limit_field_fits(player, &edited) {
+                    let member = member_ref.and_then(|r| player.movie.cast_manager.find_mut_member_by_ref(&r));
+                    if let Some(member) = member {
+                        if let CastMemberType::Field(field) = &mut member.member_type {
+                            (field.text, field.sel_start, field.sel_end, field.sel_anchor) = before;
+                            player.text_selection_start = field.sel_start.max(0) as u16;
+                            player.text_selection_end = field.sel_end.max(0) as u16;
+                        }
+                    }
+                }
             }
         });
     }

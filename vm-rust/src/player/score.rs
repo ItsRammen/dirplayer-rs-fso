@@ -6249,9 +6249,14 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             // from the authored field.width + the field's own chrome
             // settings gives a consistent, Director-faithful result.
             //
-            // Other boxTypes (#scroll, #fixed, #limit) honor
-            // sprite.width unconditionally — those are user-resizable
-            // containers independent of the member's authored width.
+            // #fixed and #limit honor sprite.width, but never draw
+            // narrower than the member's own box: Director can't shrink
+            // a field sprite below its member rect (resizing the sprite
+            // resizes the member). ROTL's chat entry ("sendchat",
+            // #limit, 780 wide) sits in a narrower score channel; drawn
+            // at that width it wrapped about 60% of the way along while
+            // Lingo (charPosToLoc, lineCount) laid it out on one 780px
+            // line, as Director did.
             let is_adjust_for_width = field_member.box_type == crate::player::symbols::builtin::BuiltInSymbol::Adjust;
             let member_authored_w = field_member.width as i32;
             let chrome_w = (2 * field_member.border as i32)
@@ -6277,6 +6282,8 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 // it is not stated in the Scripting Dictionary, and the 168 above
                 // is what pins it.
                 member_authored_w + chrome_w + FIELD_SCROLLBAR_WIDTH
+            } else if member_authored_w > 0 {
+                sprite.width.max(member_authored_w + chrome_w)
             } else {
                 sprite.width
             };
@@ -6332,7 +6339,7 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 (member_box_h, "adjust+member-height")
             } else if field_member.word_wrap && is_adjust && field_member.text_height > 0 {
                 ((field_member.text_height as i32 + extras).max(member_box_h), "wrap+adjust+text_height")
-            } else if !is_adjust && (field_member.max_height as i32) > sprite.height {
+            } else if let Some(box_h) = field_member.authored_box_height() {
                 // Non-auto-sizing box types (#scroll / #fixed / #limit) take their
                 // height from the member's authored BOX, which lives in FieldInfo
                 // `max_height` — not in `initialRect`, whose bottom tracks the
@@ -6352,12 +6359,14 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 // here) instead of the authored box, and it fired on any movie
                 // whose text overflowed slightly, not just this one.
                 //
-                // Taking the larger of the two is deliberate: where the score
-                // carries a genuine authored height (talk.text: sprite 160 vs
-                // max_height 156) nothing changes. Whether Director adds the
-                // border/margin chrome on top of max_height is not established —
-                // no chrome is added here, which matches the observed 134.
-                ((field_member.max_height as i32).max(1), "non-adjust+authored-box")
+                // The member box wins over the score channel in both
+                // directions (see FieldMember::authored_box_height): ROTL's
+                // CombatLOG box is 153 but its channel says 1536. For
+                // Summer Resort's talk.text that means 156 rather than the
+                // channel's 160. Whether Director adds the border/margin
+                // chrome on top of max_height is not established — no chrome
+                // is added here, which matches the observed 134.
+                (box_h.max(1), "non-adjust+authored-box")
             } else if sprite.height > 0 {
                 (sprite.height, "sprite.height>0")
             } else if field_member.text_height > 0 {

@@ -575,7 +575,7 @@ impl CastMemberRefHandlers {
             let _ = player
                 .movie
                 .cast_manager
-                .remove_member_with_ref(&cast_member_ref);
+                .remove_member_with_ref(&cast_member_ref, &mut player.bitmap_manager);
             Ok(DatumRef::Void)
         })
     }
@@ -654,16 +654,10 @@ impl CastMemberRefHandlers {
                 return Ok(DatumRef::Void);
             }
 
-            let member = match player.movie.cast_manager.find_member_by_ref(&src_ref) {
-                Some(m) => m.clone(),
-                // Director silently ignores a move of a member that isn't there.
+            let member = match player.movie.cast_manager.take_member_with_ref(&src_ref)? {
+                Some(member) => member,
                 None => return Ok(DatumRef::Void),
             };
-
-            // Remove first, then insert: the two refs can name the same cast,
-            // and removing afterwards would delete what we just wrote when the
-            // destination happens to be the source slot in another guise.
-            let _ = player.movie.cast_manager.remove_member_with_ref(&src_ref);
 
             let mut moved = member;
             moved.number = dest_ref.cast_member as u32;
@@ -671,7 +665,7 @@ impl CastMemberRefHandlers {
                 .movie
                 .cast_manager
                 .get_cast_mut(dest_ref.cast_lib as u32);
-            dest_cast.insert_member(dest_ref.cast_member as u32, moved);
+            dest_cast.insert_member(dest_ref.cast_member as u32, moved, &mut player.bitmap_manager);
             player.movie.cast_manager.invalidate_member_name_cache();
             player
                 .movie
@@ -747,7 +741,7 @@ impl CastMemberRefHandlers {
                 .movie
                 .cast_manager
                 .get_cast_mut(dest_ref.cast_lib as u32);
-            dest_cast.insert_member(dest_ref.cast_member as u32, new_member);
+            dest_cast.insert_member(dest_ref.cast_member as u32, new_member, &mut player.bitmap_manager);
             player.movie.cast_manager.invalidate_member_name_cache();
             player
                 .movie

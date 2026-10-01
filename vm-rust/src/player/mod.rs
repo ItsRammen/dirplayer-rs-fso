@@ -6733,29 +6733,27 @@ pub fn compute_char_at(player: &mut DirPlayer, sprite_num: i16, mx: i32, my: i32
         // Runs use BYTE positions; convert via char_indices.
         let chars_total = text.chars().count();
         let mut advances: Vec<i32> = Vec::with_capacity(chars_total);
-        // Cache loaded variant atlases by canonical name so we don't
-        // re-load Arial Bold once per run.
-        let mut variant_cache: std::collections::HashMap<String, std::rc::Rc<crate::player::font::BitmapFont>> =
+        // Cache both hits and misses for this hit test. Missing cast/PFR
+        // fonts otherwise trigger a full cast search for EVERY character,
+        // stalling mouseWord/pointToChar on long chat fields. Keep the cache
+        // local so later font imports and font-table changes remain visible.
+        let mut variant_cache: std::collections::HashMap<u16, Option<std::rc::Rc<crate::player::font::BitmapFont>>> =
             std::collections::HashMap::new();
         let min_sp = min_space_adv.unwrap_or(0) as i32;
-        // Resolve each run's font once (lazy via cache).
         let resolve_font = |player: &mut DirPlayer,
-                            cache: &mut std::collections::HashMap<String, std::rc::Rc<crate::player::font::BitmapFont>>,
+                            cache: &mut std::collections::HashMap<u16, Option<std::rc::Rc<crate::player::font::BitmapFont>>>,
                             run_font_id: u16|
          -> Option<std::rc::Rc<crate::player::font::BitmapFont>> {
-            let resolved_name = field_font_table.get(&run_font_id).cloned()?;
-            if let Some(f) = cache.get(&resolved_name) {
-                return Some(f.clone());
-            }
-            let f = player.font_manager.get_font_with_cast_and_bitmap(
-                &resolved_name,
-                &player.movie.cast_manager,
-                &mut player.bitmap_manager,
-                if font_size > 0 { Some(font_size) } else { None },
-                None,
-            )?;
-            cache.insert(resolved_name, f.clone());
-            Some(f)
+            cache.entry(run_font_id).or_insert_with(|| {
+                let resolved_name = field_font_table.get(&run_font_id)?;
+                player.font_manager.get_font_with_cast_and_bitmap(
+                    resolved_name,
+                    &player.movie.cast_manager,
+                    &mut player.bitmap_manager,
+                    if font_size > 0 { Some(font_size) } else { None },
+                    None,
+                )
+            }).clone()
         };
         // Walk chars, looking up which run covers each (by BYTE position).
         // Renderer-side scaling: each char's advance is multiplied by
