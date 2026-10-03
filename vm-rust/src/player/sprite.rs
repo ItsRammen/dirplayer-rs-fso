@@ -53,7 +53,10 @@ impl ColorRef {
 impl ToString for ColorRef {
     fn to_string(&self) -> String {
         match self {
-            ColorRef::Rgb(r, g, b) => format!("rgb({}, {}, {})", r, g, b),
+            // Director includes spaces just inside the parentheses. Legacy
+            // scripts parse these space-separated components (ROTL's crest
+            // picker) and match the full string when saving pixel colors.
+            ColorRef::Rgb(r, g, b) => format!("rgb( {}, {}, {} )", r, g, b),
             ColorRef::PaletteIndex(i) => format!("color({})", i),
         }
     }

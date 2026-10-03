@@ -2122,12 +2122,19 @@ pub fn render_score_to_bitmap_with_offset(
                     },
                 );
 
+                // Resolve sprite colors before copyPixels, whose indexed colors
+                // otherwise belong to the source bitmap palette.
+                let frame_palette = player.movie.score.get_frame_palette(player.movie.current_frame);
+                let (fr, fg, fb) = crate::player::bitmap::bitmap::resolve_sprite_color(
+                    &palettes, &sprite.color, &frame_palette);
+                let (br, bg, bb) = crate::player::bitmap::bitmap::resolve_sprite_color(
+                    &palettes, &sprite.bg_color, &frame_palette);
                 // 6) Params
                 let mut params = CopyPixelsParams {
                     blend: sprite.effective_blend(),
                     ink: sprite.ink as u32,
-                    color: sprite.color.clone(),
-                    bg_color: sprite.bg_color.clone(),
+                    color: ColorRef::Rgb(fr, fg, fb),
+                    bg_color: ColorRef::Rgb(br, bg, bb),
                     bg_color_explicit: false,
                     fore_color_explicit: false,
                     mask_image: None,

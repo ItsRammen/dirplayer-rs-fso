@@ -3097,14 +3097,18 @@ impl WebGL2Renderer {
                     // Color priority for fields:
                     // 1. Non-default RGB sprite color wins outright. Covers both
                     //    score-frame-data tweens (FurniFactory; sprite.color = RGB but
-                    //    has_fore_color=false) and Lingo writes. Black is excluded so
-                    //    a sprite at default doesn't shadow member.color.
+                    //    has_fore_color=false) and Lingo writes. Black and white are excluded so
+                    //    neutral score colors do not shadow the field's text color.
+                    //    RGB white must behave like palette white (index 0);
+                    //    ROTL's guild name and rank use those two encodings.
+                    //    Explicit Lingo/tween white still wins via has_fore_color.
                     // 2. Cast member `.color` set to RGB (CS convention).
                     // 3. Sprite has_fore_color (Lingo touched it, palette index).
                     // 4. STXT/FieldInfo fore_color (parse-time fallback).
                     // 5. Sprite color as final fallback.
                     let effective_fg = if matches!(fg_color, ColorRef::Rgb(..))
                         && fg_color != ColorRef::Rgb(0, 0, 0)
+                        && (fg_color != ColorRef::Rgb(255, 255, 255) || has_fore_color)
                     {
                         fg_color.clone()
                     } else if matches!(member.color, ColorRef::Rgb(..)) {
@@ -3494,31 +3498,20 @@ impl WebGL2Renderer {
 
         // Resolve colors to RGB for shader uniforms and colorize
         let palettes = player.movie.cast_manager.palettes();
-        // Sprite foreColor/backColor palette indices are resolved against the bitmap's palette,
-        // so they work together correctly (e.g., index 248/255 in a custom 256-color palette).
-        // A 16/32-bit image has no palette of its own (a runtime `new(#bitmap)` reports
-        // #grayscale), so there the indices go through the movie's current palette, as
-        // Director does: ROTL keys its 16-bit map layers with ink 36 on backColor 83,
-        // green only in the movie's own palette.
-        let sprite_color_palette_ref = if bitmap_bit_depth > 8
-            && matches!(texture_source, TextureSource::Bitmap { .. })
-        {
-            player.movie.score.get_frame_palette(player.movie.current_frame)
+        // Sprite colors are indexed in the current movie palette, not the
+        // member's custom palette (including indexed recolored mobs).
+        let (bg_color_rgb, fg_color_rgb) = if matches!(texture_source, TextureSource::Bitmap { .. }) {
+            let frame_palette = player.movie.score.get_frame_palette(player.movie.current_frame);
+            (
+                crate::player::bitmap::bitmap::resolve_sprite_color(&palettes, &bg_color, &frame_palette),
+                crate::player::bitmap::bitmap::resolve_sprite_color(&palettes, &fg_color, &frame_palette),
+            )
         } else {
-            bitmap_palette_ref.clone()
+            (
+                resolve_color_ref(&palettes, &bg_color, &bitmap_palette_ref, bitmap_bit_depth),
+                resolve_color_ref(&palettes, &fg_color, &bitmap_palette_ref, bitmap_bit_depth),
+            )
         };
-        let bg_color_rgb = resolve_color_ref(
-            &palettes,
-            &bg_color,
-            &sprite_color_palette_ref,
-            bitmap_bit_depth,
-        );
-        let fg_color_rgb = resolve_color_ref(
-            &palettes,
-            &fg_color,
-            &sprite_color_palette_ref,
-            bitmap_bit_depth,
-        );
 
         // Build colorize parameters if colorize is active
         // - For 1-bit bitmaps with ink 0, 1 or 36: ALWAYS apply foreColor/bgColor
@@ -8053,5 +8046,110 @@ impl super::Renderer for WebGL2Renderer {
 
         self.quad.bind(self.context.gl());
         self.render_sprite(player, channel_num);
+    }
+}
+
+#[cfg(test)]
+mod sprite_palette_regression {
+    use super::WebGL2Renderer;
+    use crate::player::sprite::ColorRef;
+    use crate::player::geometry::IntRect;
+    use crate::player::bitmap::{bitmap::{Bitmap, PaletteRef, resolve_color_ref, resolve_sprite_color}, drawing::CopyPixelsParams, palette_map::PaletteMap};
+    use crate::player::cast_lib::CastMemberRef;
+    use crate::player::cast_member::PaletteMember;
+
+    #[derive(serde::Deserialize)]
+    struct Fixture { name: String, width: u16, height: u16, palette: Vec<(u8,u8,u8)>, pixels: Vec<u8> }
+
+    #[test]
+    fn sprite_palette_real_serpents_keep_artwork_and_key_only_movie_background() {
+        // Authored F1-S bitmap indices and palettes from ROTL's cast library.
+        // Water Serpent moves key green to index 8; its index 83 is blue.
+        let fixtures: Vec<Fixture> = serde_json::from_str(include_str!("serpent_palette_fixture.json")).unwrap();
+        let mut palettes = PaletteMap::new();
+        palettes.insert(65537, PaletteMember { colors: fixtures[0].palette.clone() });
+        let movie_palette = PaletteRef::Member(CastMemberRef { cast_lib: 1, cast_member: 1 });
+        let key = resolve_sprite_color(&palettes, &ColorRef::PaletteIndex(83), &movie_palette);
+        assert_eq!(key, (49,231,33));
+        assert_eq!(resolve_sprite_color(&palettes, &ColorRef::PaletteIndex(0), &movie_palette), (255,255,255));
+        assert_eq!(resolve_sprite_color(&palettes, &ColorRef::PaletteIndex(255), &movie_palette), (0,0,0));
+        assert_eq!(resolve_sprite_color(&palettes, &ColorRef::Rgb(12,34,56), &movie_palette), (12,34,56));
+        assert_eq!(resolve_sprite_color(&palettes, &ColorRef::PaletteIndex(21), &movie_palette), fixtures[0].palette[21]);
+        for (i, f) in fixtures.iter().enumerate() {
+            let source_palette = PaletteRef::Member(CastMemberRef { cast_lib: 2, cast_member: i as i32 + 1 });
+            palettes.insert(131073 + i as u32, PaletteMember { colors: f.palette.clone() });
+            let mut src = Bitmap::new(f.width, f.height, 8, 8, 0, source_palette.clone());
+            src.data = f.pixels.clone();
+            let rgba = WebGL2Renderer::bitmap_to_rgba(&src, &palettes, 36, None, Some(key), None, (0,0), false);
+            let mut dst = Bitmap::new(f.width, f.height, 32, 32, 0, movie_palette.clone());
+            let background = (120,60,20);
+            for px in dst.data.chunks_mut(4) { px.copy_from_slice(&[120,60,20,255]); }
+            let mut params = CopyPixelsParams::default(&src);
+            params.ink = 36;
+            params.bg_color = ColorRef::Rgb(key.0,key.1,key.2);
+            let rect = IntRect::from(0,0,f.width as i32,f.height as i32);
+            dst.copy_pixels_with_params(&palettes, &src, rect.clone(), rect, &params);
+            for (p, &index) in f.pixels.iter().enumerate() {
+                let color = f.palette[index as usize];
+                let transparent = color == key;
+                assert_eq!(rgba[p*4+3], if transparent {0} else {255}, "{} pixel {}", f.name, p);
+                assert_eq!((rgba[p*4],rgba[p*4+1],rgba[p*4+2]), color);
+                assert_eq!(dst.get_pixel_color(&palettes, (p % f.width as usize) as u16, (p / f.width as usize) as u16), if transparent {background} else {color});
+            }
+            if i == 1 {
+                // Demonstrate the old palette choice reproduces the green rectangle.
+                let old_key = resolve_color_ref(&palettes, &ColorRef::PaletteIndex(83), &source_palette, 8);
+                assert_eq!(old_key, (33,49,231));
+                let before = WebGL2Renderer::bitmap_to_rgba(&src, &palettes, 36, None, Some(old_key), None, (0,0), false);
+                let p = f.pixels.iter().position(|&n| f.palette[n as usize] == key).unwrap();
+                assert_eq!(before[p*4+3],255);
+                // Direct image copies still resolve indexed keys in the image palette.
+                assert_eq!(resolve_color_ref(&palettes, &ColorRef::PaletteIndex(8), &source_palette, 8),key);
+                let expected = dst.data.clone();
+                for px in dst.data.chunks_mut(4) { px.copy_from_slice(&[120,60,20,255]); }
+                params.bg_color = ColorRef::PaletteIndex(8);
+                let rect = IntRect::from(0,0,f.width as i32,f.height as i32);
+                dst.copy_pixels_with_params(&palettes, &src, rect.clone(), rect, &params);
+                assert_eq!(dst.data, expected, "image.copyPixels keeps its source-local indexed key");
+                if let Ok(dir) = std::env::var("ROTL_SPRITE_PREVIEW_DIR") {
+                    for (name, pixels) in [("water-serpent-before.png", &before), ("water-serpent-after.png", &rgba)] {
+                        image::save_buffer(std::path::Path::new(&dir).join(name), pixels, f.width as u32, f.height as u32, image::ColorType::Rgba8).unwrap();
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod sprite_palette_low_depth_regression {
+    use crate::player::{geometry::IntRect, sprite::ColorRef, cast_lib::CastMemberRef, cast_member::PaletteMember};
+    use crate::player::bitmap::{bitmap::{Bitmap, PaletteRef, BuiltInPalette, resolve_sprite_color}, drawing::CopyPixelsParams, palette_map::PaletteMap};
+    #[test]
+    fn sprite_palette_indices_do_not_shrink_to_member_bit_depth() {
+        let mut palettes = PaletteMap::new();
+        let mut colors = vec![(255,255,255);256];
+        colors[255] = (0,0,0);
+        colors[83] = (49,231,33);
+        colors[21] = (200,40,80);
+        palettes.insert(65537, PaletteMember { colors });
+        let movie = PaletteRef::Member(CastMemberRef { cast_lib: 1, cast_member: 1 });
+        for depth in [1,4] {
+            let mut src = Bitmap::new(2,1,8,depth,0,PaletteRef::BuiltIn(BuiltInPalette::GrayScale));
+            src.data = vec![0,255];
+            let mut dst = Bitmap::new(2,1,32,32,0,movie.clone());
+            dst.data = vec![120,60,20,255,120,60,20,255];
+            let fg = resolve_sprite_color(&palettes, &ColorRef::PaletteIndex(21), &movie);
+            assert_eq!(fg,(200,40,80));
+            let mut params = CopyPixelsParams::default(&src);
+            params.ink=36;
+            params.color=ColorRef::Rgb(fg.0,fg.1,fg.2);
+            params.bg_color=ColorRef::Rgb(255,255,255);
+            let rect = IntRect::from(0,0,2,1);
+            dst.copy_pixels_with_params(&palettes,&src,rect.clone(),rect,&params);
+            assert_eq!(dst.get_pixel_color(&palettes,0,0),(120,60,20));
+            if depth==1 { assert_eq!(dst.get_pixel_color(&palettes,1,0),fg); }
+            else { assert_eq!(dst.get_pixel_color(&palettes,1,0),(0,0,0)); }
+        }
     }
 }

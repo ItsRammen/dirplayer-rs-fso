@@ -104,14 +104,7 @@ pub fn format_concrete_datum_with_depth(datum: &Datum, player: &DirPlayer, depth
         Datum::TimeoutInstance(ti) => {
             format!("timeoutInstance(\"{0}\")", ti.name)
         }
-        Datum::ColorRef(color_ref) => match color_ref {
-            ColorRef::PaletteIndex(i) => {
-                format!("color({})", i)
-            }
-            ColorRef::Rgb(r, g, b) => {
-                format!("rgb({}, {}, {})", r, g, b)
-            }
-        },
+        Datum::ColorRef(color_ref) => color_ref.to_string(),
         Datum::BitmapRef(bitmap) => {
             let bitmap = player.bitmap_manager.get_bitmap(*bitmap).unwrap();
             format!(
@@ -233,10 +226,7 @@ pub fn datum_to_string_for_concat(datum: &Datum, player: &DirPlayer) -> String {
         // Void/Null become empty string in concatenation
         Datum::Void | Datum::Null => String::new(),
         
-        Datum::ColorRef(cr) => match cr {
-            ColorRef::PaletteIndex(i) => format!("color({})", i),
-            ColorRef::Rgb(r, g, b) => format!("rgb({}, {}, {})", r, g, b),
-        },
+        Datum::ColorRef(cr) => cr.to_string(),
         
         // Lists/proplists: defer to format_concrete_datum so inner strings stay
         // quoted ([#name: "London I"], not [#name:London I]). Matches Director's
@@ -325,4 +315,31 @@ fn date_opts() -> js_sys::Object {
     let _ = js_sys::Reflect::set(&o, &"month".into(), &"2-digit".into());
     let _ = js_sys::Reflect::set(&o, &"year".into(), &"numeric".into());
     o
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod guild_color_tests {
+    use super::*;
+    use crate::player::{reserve_player_ref, testing::{run_test, TestPlayer}};
+
+    #[test]
+    fn rgb_strings_match_legacy_crest_palette_and_save_encoding() {
+        crate::player::init_symbol_table();
+        run_test(async {
+            let _player = TestPlayer::new();
+            reserve_player_ref(|p| {
+                let red = Datum::ColorRef(ColorRef::Rgb(239, 0, 0));
+                let text = format_concrete_datum(&red, p);
+                assert_eq!(text, "rgb( 239, 0, 0 )");
+                assert_eq!(ColorRef::Rgb(239, 0, 0).to_string(), text);
+                // CrestGUI reads space-separated items 2, 3, 4; SaveCrest
+                // recognizes the exact parenthesized string for each color.
+                assert_eq!(text.split(' ').nth(1), Some("239,"));
+                assert_eq!(text.split(' ').nth(2), Some("0,"));
+                assert_eq!(text.split(' ').nth(3), Some("0"));
+                assert!(text.contains("( 239, 0, 0 )"));
+                assert_eq!(datum_to_string_for_concat(&red, p), text);
+            });
+        });
+    }
 }

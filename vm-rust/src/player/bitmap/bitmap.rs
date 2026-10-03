@@ -1262,6 +1262,17 @@ fn color_fallback(color_index: u8) -> (u8, u8, u8) {
     }
 }
 
+/// Sprite palette indices belong to the movie's current palette, even when
+/// the member uses a different custom palette. Source pixel indices still use
+/// the member palette; image.copyPixels keeps its own color semantics.
+pub fn resolve_sprite_color(
+    palettes: &PaletteMap,
+    color: &ColorRef,
+    frame_palette: &PaletteRef,
+) -> (u8, u8, u8) {
+    resolve_color_ref(palettes, color, frame_palette, 8)
+}
+
 #[inline]
 pub fn resolve_color_ref(
     palettes: &PaletteMap,

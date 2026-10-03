@@ -486,7 +486,19 @@ impl StringBytecodeHandler {
         }
         
         if chunks.is_empty() {
-            return Err(ScriptError::new("getChunk: no valid chunks specified".to_string()));
+            // The bytecode has no separate chunk-type tag: `char 0 of s`
+            // (also word/item/line 0) encodes eight zero operands. This is
+            // a valid empty selection, not an invalid instruction. Use a
+            // zero-width character range so reads return EMPTY, deletion
+            // does nothing, and insertion retains the existing string.
+            // ROTL's guild-info handler reaches this while trimming zeroes
+            // from an empty statistic.
+            chunks.push(StringChunkExpr {
+                chunk_type: StringChunkType::Char,
+                start: 0,
+                end: 0,
+                item_delimiter: player.movie.item_delimiter,
+            });
         }
         
         Ok(chunks)
@@ -719,5 +731,48 @@ impl StringBytecodeHandler {
             
             Ok(HandlerExecutionResult::Advance)
         })
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod guild_chunk_tests {
+    use super::*;
+    use crate::player::{scope::Scope, testing::{run_test, TestPlayer}, reserve_player_ref};
+
+    #[test]
+    fn get_chunk_accepts_zero_and_preserves_ordinary_nested_reads() {
+        crate::player::init_symbol_table();
+        run_test(async {
+            let _player = TestPlayer::new();
+            // getChunk consumes only scope/stack data, not the handler metadata.
+            let ctx = BytecodeHandlerContext {
+                scope_ref: 0,
+                handler_def_ptr: std::ptr::null(),
+                script_ptr: std::ptr::null(),
+                names_ptr: std::ptr::null(),
+                multiplier: 1,
+            };
+            for (source, operands, expected) in [
+                ("", [0; 8], ""),
+                ("hello", [0; 8], ""),
+                ("hello", [2, 0, 0, 0, 0, 0, 0, 0], "e"),
+                ("one two\rthree four", [0, 0, 2, 0, 0, 0, 2, 0], "four"),
+            ] {
+                reserve_player_mut(|p| {
+                    let value = p.alloc_datum(Datum::String(source.to_owned()));
+                    p.scopes.clear();
+                    p.scopes.push(Scope::default(0));
+                    for operand in operands {
+                        p.scopes[0].stack.push_int(operand);
+                    }
+                    p.scopes[0].stack.push(value);
+                });
+                StringBytecodeHandler::get_chunk(&ctx).unwrap();
+                reserve_player_ref(|p| {
+                    assert_eq!(p.scopes[0].stack.len(), 1);
+                    assert_eq!(p.get_datum(p.scopes[0].stack.last().unwrap()).string_value().unwrap(), expected);
+                });
+            }
+        });
     }
 }
