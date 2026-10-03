@@ -722,6 +722,37 @@ fn mouse_event_loc(x: f64, y: f64) -> (i32, i32) {
     })
 }
 
+/// Reset host and nested-player held input after browser focus loss. This is
+/// state-only: synthesizing mouseUp could purchase/select something on return.
+#[wasm_bindgen]
+pub fn release_browser_input() {
+    reserve_player_mut(|player| player.release_browser_input());
+    unsafe {
+        if crate::player::ACTIVE_PLAYER_ID == 0 {
+            for nested in crate::player::NESTED_PLAYERS.iter_mut().flatten() {
+                nested.release_browser_input();
+            }
+        }
+    }
+}
+
+/// Reconcile the physical button mask on movement, including a missed release.
+#[wasm_bindgen]
+pub fn sync_mouse_buttons(buttons: u16) {
+    let left = buttons & 1 != 0;
+    let right = buttons & 2 != 0;
+    reserve_player_mut(|player| player.reconcile_mouse_buttons(left, right));
+    // Do not start a drag in every sub-movie. Only release missed nested presses.
+    unsafe {
+        if crate::player::ACTIVE_PLAYER_ID == 0 {
+            for nested in crate::player::NESTED_PLAYERS.iter_mut().flatten() {
+                nested.reconcile_mouse_buttons(left && nested.movie.mouse_down,
+                    right && nested.movie.right_mouse_down);
+            }
+        }
+    }
+}
+
 #[wasm_bindgen]
 pub fn mouse_down(x: f64, y: f64) {
     let (ix, iy) = mouse_event_loc(x, y);

@@ -4,6 +4,8 @@ import {
   set_stage_size,
   player_create_canvas,
   mouse_move,
+  release_browser_input,
+  sync_mouse_buttons,
   mouse_move_delta,
   mouse_down,
   mouse_up,
@@ -282,6 +284,42 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
     initialScale: number;
     initialAnchor: Pt; // canvas-space point under the initial centroid
   } | null>(null);
+
+  // A pointer/key release can occur outside this window after Alt-Tab. Cancel
+  // state without synthesizing a mouseUp (which could activate a game action).
+  const cancelPointerInteraction = useCallback(() => {
+    const target = outerRef.current;
+    for (const pointerId of activePointersRef.current.keys()) {
+      try { if (target?.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId); }
+      catch { /* capture may already have been released by the browser */ }
+    }
+    activePointersRef.current.clear();
+    singleTouchActiveRef.current = false;
+    suppressCanvasUntilReleaseRef.current = false;
+    singlePanRef.current = null;
+    middlePanRef.current = null;
+    gestureRef.current = null;
+    textDragRef.current = null;
+    lastClickRef.current = null;
+    setIsMiddlePanning(false);
+    setTextCursor(false);
+  }, []);
+
+  useEffect(() => {
+    const reset = () => {
+      cancelPointerInteraction();
+      if (isStageCanvasCreated.current) release_browser_input();
+    };
+    const onVisibility = () => reset();
+    window.addEventListener("blur", reset);
+    window.addEventListener("focus", reset);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("blur", reset);
+      window.removeEventListener("focus", reset);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [cancelPointerInteraction]);
 
   const onContainerRef = useCallback(
     (element: HTMLDivElement | null) => {
@@ -654,6 +692,14 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
   }
 
   function onPointerMove(e: React.PointerEvent) {
+    if (e.pointerType === "mouse") {
+      // A no-buttons move is also a reliable recovery signal if the browser
+      // omitted both blur and pointerup. Preserve keys and genuine drags.
+      if (e.buttons === 0 && (activePointersRef.current.size > 0 || middlePanRef.current)) {
+        cancelPointerInteraction();
+      }
+      sync_mouse_buttons(e.buttons);
+    }
     const p = pointerOuterPos(e);
     const isTracked = activePointersRef.current.has(e.pointerId);
     if (isTracked) {

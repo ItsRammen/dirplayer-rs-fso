@@ -1417,6 +1417,33 @@ impl DirPlayer {
         }
     }
 
+    /// Cancel held input without firing mouseUp/keyUp actions. Browsers can omit
+    /// release events when focus moves to another application or tab.
+    pub fn release_browser_input(&mut self) {
+        self.reconcile_mouse_buttons(false, false);
+        self.mouse_down_sprite = 0;
+        self.drag_offset = (0, 0);
+        self.field_scroll_drag = None;
+        // Let movie code observe pointer exit, including its own drag cleanup.
+        // Hidden frames must not consume a new enter at the old coordinates.
+        self.mouse_loc = (-1, -1);
+        self.keyboard_manager.down_keys.clear();
+        self.hovered_sprites.clear();
+    }
+
+    /// Browser buttons are authoritative even if a release event was missed.
+    /// Keep last-key history, field focus/selection and movie state intact.
+    pub fn reconcile_mouse_buttons(&mut self, left_down: bool, right_down: bool) {
+        let released_left = self.movie.mouse_down && !left_down;
+        self.movie.mouse_down = self.movie.mouse_down && left_down;
+        self.movie.right_mouse_down = self.movie.right_mouse_down && right_down;
+        if released_left {
+            self.mouse_down_sprite = 0;
+            self.drag_offset = (0, 0);
+            self.field_scroll_drag = None;
+        }
+    }
+
     /// The `cursor` setting belongs to the movie that made it: a new movie
     /// starts with the system arrow. A task movie that hid the cursor for a
     /// drag otherwise left the next movie without one.
@@ -8226,6 +8253,68 @@ mod handler_gap_tests {
             });
             let released = timeout(Duration::from_millis(200), wait_for_handler_gap()).await;
             assert!(released.is_ok());
+        });
+    }
+}
+
+#[cfg(test)]
+mod browser_input_recovery_tests {
+    use super::*;
+    use crate::player::testing::{run_test, TestPlayer};
+
+    #[test]
+    fn focus_loss_releases_input_without_losing_field_focus_or_last_key() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            reserve_player_mut(|p| {
+                p.movie.mouse_down = true;
+                p.movie.right_mouse_down = true;
+                p.mouse_down_sprite = 180;
+                p.click_on_sprite = 180;
+                p.drag_offset = (4, 5);
+                p.field_scroll_drag = Some((180, 2));
+                p.hovered_sprites = vec![180];
+                p.keyboard_focus_sprite = 21;
+                p.keyboard_manager.key_down("Alt".into(), 18);
+                p.mouse_loc = (123, 456);
+                p.release_browser_input();
+                p.release_browser_input(); // blur + hidden are safe together
+                assert!(!p.movie.mouse_down);
+                assert!(!p.movie.right_mouse_down);
+                assert_eq!(p.mouse_down_sprite, 0);
+                assert_eq!(p.click_on_sprite, 180);
+                assert_eq!(p.drag_offset, (0, 0));
+                assert!(p.field_scroll_drag.is_none());
+                assert!(p.hovered_sprites.is_empty());
+                assert!(p.keyboard_manager.down_keys.is_empty());
+                assert!(p.keyboard_manager.last_key.is_some());
+                assert_eq!(p.keyboard_focus_sprite, 21);
+                assert_eq!(p.mouse_loc, (-1, -1));
+            });
+        });
+    }
+
+    #[test]
+    fn pointer_reconciliation_keeps_real_drags_and_held_keys() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            reserve_player_mut(|p| {
+                p.movie.mouse_down = true;
+                p.mouse_down_sprite = 180;
+                p.field_scroll_drag = Some((180, 2));
+                p.keyboard_manager.key_down("Shift".into(), 16);
+                p.reconcile_mouse_buttons(true, false);
+                assert!(p.movie.mouse_down);
+                assert_eq!(p.mouse_down_sprite, 180);
+                assert!(p.field_scroll_drag.is_some());
+                p.reconcile_mouse_buttons(false, true);
+                assert!(!p.movie.mouse_down);
+                assert!(!p.movie.right_mouse_down, "movement must not invent a right click");
+                assert!(p.field_scroll_drag.is_none());
+                assert!(p.keyboard_manager.is_shift_down());
+            });
         });
     }
 }
