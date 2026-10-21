@@ -119,6 +119,19 @@ impl FileIoXtraInstance {
     }
 }
 
+/// A movie wrote to an open file. Like a file on a disk it is there for the next
+/// openFile, and since there is no disk to leave it on in a browser, a log or
+/// document is also offered to the player as a download (`download::offer_written_file`).
+fn flush_write(manager: &mut FileIoXtraManager, instance_id: u32) {
+    let Some(instance) = manager.instances.get(&instance_id) else { return };
+    if !instance.is_open || instance.file_name.is_empty() {
+        return;
+    }
+    let (name, data) = (instance.file_name.clone(), instance.data.clone());
+    super::download::offer_written_file(&name, &data);
+    manager.virtual_fs.insert(name, data);
+}
+
 pub struct FileIoXtraManager {
     pub instances: FxHashMap<u32, FileIoXtraInstance>,
     pub instance_counter: u32,
@@ -274,19 +287,48 @@ impl FileIoXtraManager {
         match handler.as_str() {
             // openfile is handled by call_instance_async_handler
             "openfile" => {
-                // Should not reach here - async handler takes priority
-                Err(ScriptError::new("openFile should be handled by async handler".to_string()))
+                // The method form (`instance.openFile(...)`) takes the async handler, which can
+                // fetch a file from the server. The old form `openFile(instance, path, mode)`
+                // arrives here, where nothing can be awaited, so it opens what is already in the
+                // virtual filesystem (a file the movie created or wrote earlier, such as ROTL's
+                // chat log: createFile, then openFile) and otherwise behaves as the async one does
+                // when the fetch fails: an empty file, or "not found" in read-only mode.
+                let (file_name, mode) = reserve_player_mut(|player| {
+                    let name = player.get_datum(&args[0]).string_value()?;
+                    let mode = if args.len() > 1 { player.get_datum(&args[1]).int_value()? } else { 1 };
+                    Ok((name, mode))
+                })?;
+                let relative = file_name.rsplit(['\\', '/']).next().unwrap_or(&file_name).to_string();
+                let stored = manager.virtual_fs.get(&file_name).or_else(|| manager.virtual_fs.get(&relative)).cloned();
+                let instance = manager.instances.get_mut(&instance_id).unwrap();
+                instance.file_name = file_name;
+                instance.position = 0;
+                instance.last_error = 0;
+                instance.is_open = true;
+                match stored {
+                    Some(data) => instance.data = data,
+                    None => {
+                        instance.data = Vec::new();
+                        if mode == 1 {
+                            instance.last_error = -43;
+                        }
+                    }
+                }
+                reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Void)))
             }
             "createfile" => {
                 let file_name = reserve_player_mut(|player| {
                     player.get_datum(&args[0]).string_value()
                 })?;
                 let instance = manager.instances.get_mut(&instance_id).unwrap();
-                instance.file_name = file_name;
+                instance.file_name = file_name.clone();
                 instance.data = Vec::new();
                 instance.position = 0;
                 instance.is_open = true;
                 instance.last_error = 0;
+                // The file exists from now on, as on a disk: a following openFile finds it here
+                // and does not go to the network for a file the movie has just made.
+                manager.virtual_fs.insert(file_name, Vec::new());
 
                 reserve_player_mut(|player| {
                     Ok(player.alloc_datum(Datum::Void))
@@ -411,6 +453,7 @@ impl FileIoXtraManager {
                 } else {
                     instance.last_error = -1;
                 }
+                flush_write(manager, instance_id);
                 Ok(DatumRef::Void)
             }
             "writechar" => {
@@ -427,6 +470,7 @@ impl FileIoXtraManager {
                     }
                     instance.position += 1;
                 }
+                flush_write(manager, instance_id);
                 Ok(DatumRef::Void)
             }
             "writereturn" => {
@@ -439,6 +483,7 @@ impl FileIoXtraManager {
                     }
                     instance.position += 1;
                 }
+                flush_write(manager, instance_id);
                 Ok(DatumRef::Void)
             }
 
@@ -596,4 +641,48 @@ pub fn borrow_fileio_manager_mut<T>(
 ) -> T {
     let manager = unsafe { FILEIO_XTRA_MANAGER_OPT.as_mut().unwrap() };
     callback(manager)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_instance(manager: &mut FileIoXtraManager, name: &str, data: &[u8]) -> u32 {
+        let id = manager.create_instance(&Vec::new());
+        let instance = manager.instances.get_mut(&id).unwrap();
+        instance.file_name = name.to_string();
+        instance.is_open = true;
+        instance.data = data.to_vec();
+        id
+    }
+
+    #[test]
+    fn a_written_file_is_there_for_the_next_openfile_like_a_file_on_a_disk() {
+        let mut manager = FileIoXtraManager::new();
+        let id = open_instance(&mut manager, "LogChat123.htm", b"<html>chat</html>");
+        flush_write(&mut manager, id);
+        assert_eq!(manager.virtual_fs.get("LogChat123.htm").map(|d| d.as_slice()), Some(&b"<html>chat</html>"[..]));
+    }
+
+    #[test]
+    fn later_writes_replace_the_stored_copy() {
+        let mut manager = FileIoXtraManager::new();
+        let id = open_instance(&mut manager, "run.log", b"one");
+        flush_write(&mut manager, id);
+        manager.instances.get_mut(&id).unwrap().data.extend_from_slice(b" two");
+        flush_write(&mut manager, id);
+        assert_eq!(manager.virtual_fs.get("run.log").map(|d| d.as_slice()), Some(&b"one two"[..]));
+    }
+
+    #[test]
+    fn a_file_that_is_not_open_is_not_stored() {
+        let mut manager = FileIoXtraManager::new();
+        let id = open_instance(&mut manager, "x.log", b"data");
+        manager.instances.get_mut(&id).unwrap().is_open = false;
+        flush_write(&mut manager, id);
+        assert!(manager.virtual_fs.get("x.log").is_none());
+        let unnamed = open_instance(&mut manager, "", b"data");
+        flush_write(&mut manager, unnamed);
+        assert!(manager.virtual_fs.is_empty());
+    }
 }

@@ -225,6 +225,7 @@ define_builtin_symbols! {
     "long time" => LongTime,
     "lastChannel" => LastChannel,
     "moviePath" => MoviePath,
+    "applicationPath" => ApplicationPath,
     "frame" => Frame,
     "path" => Path,
     "timer" => Timer,

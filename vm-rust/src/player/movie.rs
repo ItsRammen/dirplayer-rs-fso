@@ -225,7 +225,9 @@ impl Movie {
             // A score always has at least frame 1, so fall back to 1 rather than 0
             // when the frame count couldn't be determined.
             BuiltInSymbol::LastFrame => Ok(Datum::Int(self.score.frame_count.unwrap_or(1).max(1) as i32)),
-            BuiltInSymbol::MoviePath => {
+            // The folder the projector runs from. A movie on the web has only its own folder, and
+            // that is where one installed in a single folder would find its files.
+            BuiltInSymbol::MoviePath | BuiltInSymbol::ApplicationPath => {
                 let mut result = self.base_path.clone();
                 if !result.is_empty() && !result.ends_with(PATH_SEPARATOR) {
                     result.push_str(PATH_SEPARATOR);

@@ -1,5 +1,6 @@
 pub mod budapi;
 pub mod curl;
+pub mod download;
 pub mod external;
 pub mod fileio;
 pub mod leechprotection;
@@ -7,5 +8,6 @@ pub mod manager;
 pub mod multiuser;
 pub mod openurl;
 pub mod scene3d;
+pub mod shockfiler;
 pub mod sysmenu;
 pub mod xmlparser;

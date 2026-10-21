@@ -4,6 +4,7 @@ use crate::{
 };
 
 use super::budapi::BudApiXtra;
+use super::shockfiler::ShockFilerXtra;
 use super::curl::{CurlXtra, CurlXtraManager};
 use super::external;
 use super::fileio::{borrow_fileio_manager_mut, FileIoXtraManager};
@@ -27,6 +28,7 @@ pub fn is_xtra_registered(name: &str) -> bool {
         || name_lower == "openurl"
         || name_lower == "sysmenu"
         || name_lower == "budapi"
+        || name_lower == "shockfiler"
         || name_lower == "leechprotectionremovalhelp";
 }
 
@@ -39,6 +41,7 @@ pub fn get_registered_xtra_names() -> Vec<String> {
         "OpenURL".to_string(),
         "SysMenu".to_string(),
         "BudAPI".to_string(),
+        "ShockFiler".to_string(),
         "LeechProtectionRemovalHelp".to_string(),
     ];
     // Append any externally loaded xtras. Names are stored lowercased in
@@ -63,6 +66,9 @@ pub fn try_call_xtra_static_handler(
     }
     if BudApiXtra::has_handler(name) {
         return Some(BudApiXtra::call_handler(name, args));
+    }
+    if ShockFilerXtra::has_handler(name) {
+        return Some(ShockFilerXtra::call_handler(name, args));
     }
     if LeechProtectionXtra::has_handler(name) {
         return Some(LeechProtectionXtra::call_handler(name, args));
