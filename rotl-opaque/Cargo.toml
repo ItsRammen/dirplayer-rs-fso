@@ -1,0 +1,30 @@
+[package]
+name = "rotl-opaque"
+version = "0.1.0"
+edition = "2021"
+description = "OPAQUE password login for Return of the Legends: the player never sends its password and the server never sees it."
+license = "GPL-3.0-only"
+
+[features]
+# The JavaScript bindings the game server uses (built with `wasm-pack ... -- --features js`). Off for the player.
+js = ["dep:wasm-bindgen"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+opaque-ke = { version = "4", default-features = false, features = ["ristretto255", "argon2", "std", "serde"] }
+getrandom = { version = "0.2", features = ["js"] }
+wasm-bindgen = { version = "0.2", optional = true }
+sha2 = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+
+# The password-stretching step is deliberately slow; keep it quick enough for tests.
+[profile.test]
+opt-level = 3
+[profile.dev.package."*"]
+opt-level = 3
