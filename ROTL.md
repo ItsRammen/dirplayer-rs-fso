@@ -63,6 +63,10 @@ registers an OPAQUE record, so even that step never sends the password.
 npm run build-vm-secure          # the same as build-vm, with the feature on
 ```
 
+Creating a character goes through the same Xtra: the creation message is held, the new password is registered with the
+server (`OpaqueCreate`, `OpaqueCreateResponse`, `OpaqueCreateFinish`), and the message leaves with a marker where the
+password was. The account is secure-login only and has no password hash at all.
+
 A build without the feature contains none of the cryptography and behaves exactly as before. A build with it still
 logs in the old way unless the page sets the external param `secure_login=1`, so one build can serve both kinds of
 server. `rotl-opaque/` is a copy of the crate in the (private) NodeJS-ROTL repo, which owns it and the server half;

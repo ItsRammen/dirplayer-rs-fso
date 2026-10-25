@@ -28,6 +28,12 @@ pub const SUBJECT_MIGRATE: &str = "OpaqueMigrate";
 pub const SUBJECT_REGISTER_RESPONSE: &str = "OpaqueRegisterResponse";
 /// Player → server: the last step of the registration.
 pub const SUBJECT_REGISTER_FINISH: &str = "OpaqueRegisterFinish";
+/// Player → server: `name|registrationRequest`, a new character's password being registered before it is created.
+pub const SUBJECT_CREATE: &str = "OpaqueCreate";
+/// Server → player: the server's answer (empty when it will not do it: the player then carries on without).
+pub const SUBJECT_CREATE_RESPONSE: &str = "OpaqueCreateResponse";
+/// Player → server: the finished registration; the character-creation message follows it.
+pub const SUBJECT_CREATE_FINISH: &str = "OpaqueCreateFinish";
 /// In place of the password in the movie's own messages once the connection is authenticated.
 pub const OPAQUE_MARKER: &str = "*opaque*";
 /// In place of the hash the movie sends in `LoginAuth`.
@@ -43,6 +49,22 @@ pub struct SecureLogin {
     /// While an old account is being upgraded: where the registration stands.
     registration: Option<Vec<u8>>,
     upgraded: bool,
+    /// While a new character's password is being registered.
+    creation: Option<Creation>,
+}
+
+struct Creation {
+    name: String,
+    password: String,
+    state: Vec<u8>,
+}
+
+/// What to do with a message the movie wants to send.
+pub enum Outgoing {
+    /// Send it now (it may have been changed in place).
+    Send,
+    /// Hold it: first send `OpaqueCreate` with this content, and send the held message once the server has answered.
+    StartCreate(String),
 }
 
 impl SecureLogin {
@@ -51,7 +73,7 @@ impl SecureLogin {
         let started = rotl_opaque::client_login_start(password.as_bytes()).map_err(|e| e.to_string())?;
         let field = format!("{}{}", LOGON_PREFIX, STANDARD.encode(&started.request));
         Ok((
-            SecureLogin { username: username.to_string(), password: password.to_string(), state: started.state, session_key: None, hash_token: None, registration: None, upgraded: false },
+            SecureLogin { username: username.to_string(), password: password.to_string(), state: started.state, session_key: None, hash_token: None, registration: None, upgraded: false, creation: None },
             field,
         ))
     }
@@ -91,6 +113,62 @@ impl SecureLogin {
 
     pub fn session_key(&self) -> Option<&[u8]> {
         self.session_key.as_deref()
+    }
+
+    /// Looks at a message the movie is about to send. Creating a character is the one thing that is more than a rewrite:
+    /// the new password is registered first, so the creation message that follows carries the marker instead of it.
+    pub fn prepare_outgoing(&mut self, subject: &str, content: &mut StaticDatum) -> Outgoing {
+        let StaticDatum::String(text) = content else { return Outgoing::Send };
+        match subject {
+            // `name:password`: only asks whether the name is free.
+            "CheckifRemake" => {
+                if let Some((name, password)) = text.split_once(':') {
+                    if !password.is_empty() && password != OPAQUE_MARKER {
+                        *text = format!("{}:{}", name, OPAQUE_MARKER);
+                    }
+                }
+                Outgoing::Send
+            }
+            // `code`name:password:...` (the same shape in both generations of the client)
+            "QueryCreate" => {
+                let Some((code, rest)) = text.split_once('`') else { return Outgoing::Send };
+                let mut fields: Vec<String> = rest.split(':').map(str::to_string).collect();
+                if fields.len() < 2 || fields[1].is_empty() || fields[1] == OPAQUE_MARKER {
+                    return Outgoing::Send;
+                }
+                let name = fields[0].trim().to_string();
+                let password = std::mem::replace(&mut fields[1], OPAQUE_MARKER.to_string());
+                let rewritten = format!("{}`{}", code, fields.join(":"));
+                *text = rewritten;
+                // The password never goes out. If it cannot be registered (or the name could not be carried), the
+                // message still goes with the marker and the server turns it down.
+                if name.is_empty() || name.contains('|') {
+                    return Outgoing::Send;
+                }
+                match rotl_opaque::client_registration_start(password.as_bytes()) {
+                    Ok(started) => {
+                        let start = format!("{}|{}", name, STANDARD.encode(&started.request));
+                        self.creation = Some(Creation { name, password, state: started.state });
+                        Outgoing::StartCreate(start)
+                    }
+                    Err(_) => Outgoing::Send,
+                }
+            }
+            _ => Outgoing::Send,
+        }
+    }
+
+    /// The server answered the registration of a new character's password. Returns the content for `OpaqueCreateFinish`,
+    /// or an error (an empty answer means the server will not do it) after which the creation message goes on anyway
+    /// and the server turns it down.
+    pub fn answer_create_response(&mut self, response_base64: &str) -> Result<String, String> {
+        let creation = self.creation.take().ok_or_else(|| "no sign-up in progress".to_string())?;
+        if response_base64.trim().is_empty() {
+            return Err("the server did not accept the secure sign-up".into());
+        }
+        let response = STANDARD.decode(response_base64.trim()).map_err(|_| "the server's answer was not valid".to_string())?;
+        let upload = rotl_opaque::client_registration_finish(&creation.state, creation.password.as_bytes(), &response, &creation.name).map_err(|e| e.to_string())?;
+        Ok(STANDARD.encode(&upload))
     }
 
     /// Rewrites a message the movie is about to send so the password (and anything made from it) stays here.
@@ -350,10 +428,69 @@ mod tests {
         assert_eq!(as_str(&chat), token);
     }
 
+    fn is_start(outgoing: &Outgoing) -> Option<&str> { match outgoing { Outgoing::StartCreate(s) => Some(s), Outgoing::Send => None } }
+
+    #[test]
+    fn creating_a_character_registers_the_password_first_and_never_sends_it() {
+        let (mut login, _) = SecureLogin::begin("newchar42", "creation-literal").unwrap();
+        // Both generations of the client send the same shape: code`name:password:...
+        for shape in ["CODE`Brenna:s3cret-unique:MaleGBod-Head1:Ranger:3:3:2:me@example.com", "CODE`Brenna:s3cret-unique:MaleGBod:Ranger:3:3:2:me@example.com"] {
+            let mut content = text(shape);
+            let outgoing = login.prepare_outgoing("QueryCreate", &mut content);
+            let start = is_start(&outgoing).expect("the registration starts first");
+            assert!(as_str(&content).starts_with("CODE`Brenna:*opaque*:"), "{}", as_str(&content));
+            assert!(as_str(&content).ends_with(":me@example.com"), "everything else is kept");
+            assert!(!as_str(&content).contains("s3cret") && !start.contains("s3cret"));
+            let (name, request) = start.split_once('|').unwrap();
+            assert_eq!(name, "Brenna");
+            // The server's half, as the NodeJS server runs it.
+            let setup = rotl_opaque::server_setup_new();
+            let response = rotl_opaque::server_registration_start(&setup, &STANDARD.decode(request).unwrap(), "Brenna").unwrap();
+            let upload = login.answer_create_response(&STANDARD.encode(&response)).unwrap();
+            let record = rotl_opaque::server_registration_finish(&STANDARD.decode(upload).unwrap()).unwrap();
+            // The record is for the new password and this name.
+            let (mut again, field) = SecureLogin::begin("Brenna", "s3cret-unique").unwrap();
+            let (challenge, state) = server_answers(&setup, Some(&record), "Brenna", &field);
+            let finish = again.answer_challenge(&challenge).unwrap();
+            assert!(rotl_opaque::server_login_finish(&state, &STANDARD.decode(finish).unwrap(), "Brenna").is_ok());
+        }
+    }
+
+    #[test]
+    fn a_declined_or_damaged_sign_up_answer_is_an_error_and_the_message_still_leaves_without_the_password() {
+        let (mut login, _) = SecureLogin::begin("newchar42", "x").unwrap();
+        let mut content = text("CODE`Corwin:pw1:MaleGBod:Ranger:3:3:2:a@b.c");
+        assert!(is_start(&login.prepare_outgoing("QueryCreate", &mut content)).is_some());
+        assert!(login.answer_create_response("").is_err(), "an empty answer: the server declined");
+        assert_eq!(as_str(&content), "CODE`Corwin:*opaque*:MaleGBod:Ranger:3:3:2:a@b.c");
+        assert!(login.answer_create_response("AAAA").is_err(), "nothing in progress any more");
+        let mut again = text("CODE`Corwin:pw1:MaleGBod:Ranger:3:3:2:a@b.c");
+        login.prepare_outgoing("QueryCreate", &mut again);
+        assert!(login.answer_create_response("not base64 !!").is_err());
+    }
+
+    #[test]
+    fn the_name_check_loses_the_password_and_odd_shapes_are_left_to_the_server() {
+        let (mut login, _) = SecureLogin::begin("newchar42", "x").unwrap();
+        let mut check = text("Dara:my-password");
+        assert!(is_start(&login.prepare_outgoing("CheckifRemake", &mut check)).is_none());
+        assert_eq!(as_str(&check), "Dara:*opaque*");
+        for (subject, original) in [("QueryCreate", "no backtick here:pw"), ("QueryCreate", "CODE`OnlyAName"), ("QueryCreate", "CODE`Edda::x"), ("CheckifRemake", "NoColon"), ("Chat", "CODE`Edda:pw:x")] {
+            let mut content = text(original);
+            assert!(is_start(&login.prepare_outgoing(subject, &mut content)).is_none(), "{subject} {original}");
+            assert_eq!(as_str(&content), original, "left alone");
+        }
+        // A name that cannot be carried is not registered, but the password still does not go out.
+        let mut odd = text("CODE`Ev|a:secret:MaleGBod:Ranger:3:3:2:a@b.c");
+        assert!(is_start(&login.prepare_outgoing("QueryCreate", &mut odd)).is_none());
+        assert!(!as_str(&odd).contains("secret"));
+    }
+
     #[test]
     fn other_messages_and_non_text_content_pass_through_untouched() {
         let (mut login, _) = SecureLogin::begin("Alice", "pw").unwrap();
         for subject in ["Chat", "Move", "QueryCreate", "CheckifRemake"] {
+            // (creating a character is handled by prepare_outgoing, not by this plain rewrite)
             let mut content = text("hello pw world :pw:");
             login.redact_outgoing(subject, &mut content);
             assert_eq!(as_str(&content), "hello pw world :pw:", "{subject}");
