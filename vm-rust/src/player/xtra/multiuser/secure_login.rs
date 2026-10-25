@@ -119,6 +119,8 @@ impl SecureLogin {
     /// the new password is registered first, so the creation message that follows carries the marker instead of it.
     pub fn prepare_outgoing(&mut self, subject: &str, content: &mut StaticDatum) -> Outgoing {
         let StaticDatum::String(text) = content else { return Outgoing::Send };
+        // The movie spells this one "CheckIfRemake"; the server does not care about the case, so neither can this.
+        let subject = if subject.eq_ignore_ascii_case("CheckifRemake") { "CheckifRemake" } else { subject };
         match subject {
             // `name:password`: only asks whether the name is free.
             "CheckifRemake" => {
@@ -475,6 +477,10 @@ mod tests {
         let mut check = text("Dara:my-password");
         assert!(is_start(&login.prepare_outgoing("CheckifRemake", &mut check)).is_none());
         assert_eq!(as_str(&check), "Dara:*opaque*");
+        // The real movie's spelling.
+        let mut movie = text("Brenna:brenna-secret-9");
+        assert!(is_start(&login.prepare_outgoing("CheckIfRemake", &mut movie)).is_none());
+        assert_eq!(as_str(&movie), "Brenna:*opaque*");
         for (subject, original) in [("QueryCreate", "no backtick here:pw"), ("QueryCreate", "CODE`OnlyAName"), ("QueryCreate", "CODE`Edda::x"), ("CheckifRemake", "NoColon"), ("Chat", "CODE`Edda:pw:x")] {
             let mut content = text(original);
             assert!(is_start(&login.prepare_outgoing(subject, &mut content)).is_none(), "{subject} {original}");
