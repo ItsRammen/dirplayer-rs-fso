@@ -68,36 +68,49 @@ impl MultiuserXtraInstance {
     /// The server's answer to an OPAQUE login is for this Xtra, not the movie: it is consumed here, and the last step
     /// goes straight back. Anything the movie will see has the hash it sent in `LoginAuth` put back first.
     #[cfg(feature = "rotl-secure-login")]
-    fn handle_secure_login(&mut self, message: &mut MultiuserMessage) -> bool {
-        let Some(secure) = self.secure_login.as_mut() else { return false };
-        if message.subject != secure_login::SUBJECT_CHALLENGE {
-            secure.restore_incoming(&message.subject, &mut message.content);
-            return false;
+    fn send_to_server(&self, subject: &str, content: String) {
+        if let Some(tx) = &self.socket_tx {
+            let message = MultiuserMessage {
+                error_code: 0,
+                recipients: vec!["System".to_string()],
+                sender_id: self.sender_id.clone(),
+                subject: subject.to_string(),
+                content: StaticDatum::String(content),
+                time_stamp: 0,
+            };
+            let _ = tx.try_send(message.to_bytes(None));
         }
-        let challenge = match &message.content {
+    }
+
+    /// The server's steps of an OPAQUE login are for this Xtra, not the movie: they are consumed here and answered at
+    /// once. Anything the movie will see has the hash it sent in `LoginAuth` put back first.
+    #[cfg(feature = "rotl-secure-login")]
+    fn handle_secure_login(&mut self, message: &mut MultiuserMessage) -> bool {
+        use secure_login::*;
+        let Some(secure) = self.secure_login.as_mut() else { return false };
+        let content = match &message.content {
             StaticDatum::String(text) => text.clone(),
             _ => String::new(),
         };
-        let finish = match secure.answer_challenge(&challenge) {
-            Ok(content) => content,
+        // A wrong password (or any step that cannot be completed) ends here, on this side. The server is sent an empty
+        // answer, so it counts the failed attempt and answers the movie as it does for a wrong password today.
+        let step = |outcome: Result<String, String>| match outcome {
+            Ok(answer) => answer,
             Err(why) => {
-                // A wrong password ends here, on this side. The server is told with an empty last step, so it
-                // counts the failed attempt and answers the movie as it does for a wrong password today.
                 multiuser_log!("Multiuser: secure login did not complete: {}", why);
                 String::new()
             }
         };
-        if let Some(tx) = &self.socket_tx {
-            let reply = MultiuserMessage {
-                error_code: 0,
-                recipients: vec!["System".to_string()],
-                sender_id: self.sender_id.clone(),
-                subject: secure_login::SUBJECT_FINISH.to_string(),
-                content: StaticDatum::String(finish),
-                time_stamp: 0,
-            };
-            let _ = tx.try_send(reply.to_bytes(None));
-        }
+        let (reply_subject, answer) = match message.subject.as_str() {
+            SUBJECT_CHALLENGE => (SUBJECT_FINISH, step(secure.answer_challenge(&content))),
+            SUBJECT_LEGACY => (SUBJECT_MIGRATE, step(secure.answer_legacy(&content))),
+            SUBJECT_REGISTER_RESPONSE => (SUBJECT_REGISTER_FINISH, step(secure.answer_register_response(&content))),
+            _ => {
+                secure.restore_incoming(&message.subject, &mut message.content);
+                return false;
+            }
+        };
+        self.send_to_server(reply_subject, answer);
         true
     }
 

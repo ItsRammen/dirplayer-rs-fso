@@ -20,6 +20,14 @@ pub const LOGON_PREFIX: &str = "OPAQUE1:";
 pub const SUBJECT_CHALLENGE: &str = "OpaqueLogin";
 /// Player → server: the last step of the login (empty content when the password turned out wrong).
 pub const SUBJECT_FINISH: &str = "OpaqueFinish";
+/// Server → player: this account has no OPAQUE record yet, only a bcrypt hash; the content is the hash's salt part.
+pub const SUBJECT_LEGACY: &str = "OpaqueLegacy";
+/// Player → server: `hash|registrationRequest`, the bcrypt hash computed here, and the start of a registration.
+pub const SUBJECT_MIGRATE: &str = "OpaqueMigrate";
+/// Server → player: the server's answer to the registration request.
+pub const SUBJECT_REGISTER_RESPONSE: &str = "OpaqueRegisterResponse";
+/// Player → server: the last step of the registration.
+pub const SUBJECT_REGISTER_FINISH: &str = "OpaqueRegisterFinish";
 /// In place of the password in the movie's own messages once the connection is authenticated.
 pub const OPAQUE_MARKER: &str = "*opaque*";
 /// In place of the hash the movie sends in `LoginAuth`.
@@ -32,6 +40,9 @@ pub struct SecureLogin {
     session_key: Option<Vec<u8>>,
     /// The hash the movie sent in `LoginAuth` and the token that stands for it on the wire.
     hash_token: Option<(String, String)>,
+    /// While an old account is being upgraded: where the registration stands.
+    registration: Option<Vec<u8>>,
+    upgraded: bool,
 }
 
 impl SecureLogin {
@@ -40,7 +51,7 @@ impl SecureLogin {
         let started = rotl_opaque::client_login_start(password.as_bytes()).map_err(|e| e.to_string())?;
         let field = format!("{}{}", LOGON_PREFIX, STANDARD.encode(&started.request));
         Ok((
-            SecureLogin { username: username.to_string(), password: password.to_string(), state: started.state, session_key: None, hash_token: None },
+            SecureLogin { username: username.to_string(), password: password.to_string(), state: started.state, session_key: None, hash_token: None, registration: None, upgraded: false },
             field,
         ))
     }
@@ -56,7 +67,26 @@ impl SecureLogin {
     }
 
     pub fn is_established(&self) -> bool {
-        self.session_key.is_some()
+        self.session_key.is_some() || self.upgraded
+    }
+
+    /// The server says this account has only a bcrypt hash. Works out that hash here from the salt the server sent and
+    /// starts a registration, so the server can check the hash and store a record without ever seeing the password.
+    /// Returns the content for `OpaqueMigrate`.
+    pub fn answer_legacy(&mut self, salt_part: &str) -> Result<String, String> {
+        let proof = bcrypt_proof(&self.password, salt_part)?;
+        let started = rotl_opaque::client_registration_start(self.password.as_bytes()).map_err(|e| e.to_string())?;
+        self.registration = Some(started.state);
+        Ok(format!("{}|{}", proof, STANDARD.encode(&started.request)))
+    }
+
+    /// The server answered the registration request. Returns the content for `OpaqueRegisterFinish`.
+    pub fn answer_register_response(&mut self, response_base64: &str) -> Result<String, String> {
+        let state = self.registration.take().ok_or_else(|| "no registration in progress".to_string())?;
+        let response = STANDARD.decode(response_base64.trim()).map_err(|_| "the server's answer was not valid".to_string())?;
+        let upload = rotl_opaque::client_registration_finish(&state, self.password.as_bytes(), &response, &self.username).map_err(|e| e.to_string())?;
+        self.upgraded = true;
+        Ok(STANDARD.encode(&upload))
     }
 
     pub fn session_key(&self) -> Option<&[u8]> {
@@ -110,6 +140,50 @@ impl SecureLogin {
     }
 }
 
+/// bcrypt's own base64 alphabet (not the usual one).
+const BCRYPT_ALPHABET: &[u8; 64] = b"./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+/// The 16 salt bytes from the 22 characters of a bcrypt salt.
+fn decode_bcrypt_salt(chars: &str) -> Option<[u8; 16]> {
+    let mut bits: u32 = 0;
+    let mut have = 0u32;
+    let mut out = [0u8; 16];
+    let mut n = 0;
+    for c in chars.bytes() {
+        let value = BCRYPT_ALPHABET.iter().position(|&a| a == c)? as u32;
+        bits = (bits << 6) | value;
+        have += 6;
+        if have >= 8 && n < 16 {
+            have -= 8;
+            out[n] = ((bits >> have) & 0xff) as u8;
+            n += 1;
+        }
+    }
+    (n == 16).then_some(out)
+}
+
+/// The bcrypt hash of `password` for the salt part the server sent (`$2b$10$` plus 22 characters). The result is exactly
+/// the hash the server stored, which is what lets it check we know the password without being told it.
+pub fn bcrypt_proof(password: &str, salt_part: &str) -> Result<String, String> {
+    let mut fields = salt_part.trim().split('$');
+    let (empty, version, cost, rest) = (fields.next(), fields.next(), fields.next(), fields.next());
+    if empty != Some("") {
+        return Err("the salt is not a bcrypt salt".into());
+    }
+    let version = match version {
+        Some("2a") => bcrypt::Version::TwoA,
+        Some("2b") => bcrypt::Version::TwoB,
+        Some("2x") => bcrypt::Version::TwoX,
+        Some("2y") => bcrypt::Version::TwoY,
+        _ => return Err("the salt is not a bcrypt salt".into()),
+    };
+    // The server chooses the cost, so it is bounded: a hostile answer must not be able to keep this page busy for long.
+    let cost: u32 = cost.and_then(|c| c.parse().ok()).filter(|c| (4..=14).contains(c)).ok_or_else(|| "the bcrypt cost is out of range".to_string())?;
+    let salt = rest.and_then(|r| r.get(..22)).and_then(decode_bcrypt_salt).ok_or_else(|| "the bcrypt salt is damaged".to_string())?;
+    let parts = bcrypt::hash_with_salt(password.as_bytes(), cost, salt).map_err(|e| e.to_string())?;
+    Ok(parts.format_for_version(version))
+}
+
 fn random_hex(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     getrandom::fill(&mut buf).expect("the browser's random numbers are unavailable");
@@ -121,6 +195,66 @@ mod tests {
     use super::*;
 
     fn text(s: &str) -> StaticDatum { StaticDatum::String(s.to_string()) }
+
+    /// Hashes made by the SERVER's bcrypt (Node's `bcrypt` package), so the player and the server are known to agree.
+    const SERVER_HASHES: &[(&str, &str)] = &[
+        ("old password", "$2b$04$hdDLG02//jr3zVg1aqif/.66Lw02hBnjLULwZSMsAXCvp0UtoH1Ju"),
+        ("correct horse battery staple", "$2b$06$jOC3Ji7Ri01tRp8Kyl1ObeD41n5cIIOnyVXSuxNEXNKib7Srin4f6"),
+        ("p@ss:word|with%odd chars", "$2b$04$pk4cv1IO/oTAEMS2RYRC3.XnlPi84lraYOjcvQBsFQYrBCMCe0Tm6"),
+        ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "$2b$04$nONg62ppIzBECafXTGAEXuQFNLUI7Xev0C156fzaMYtGYUU9c7TAu"),
+        ("héllo wörld ✓", "$2b$04$nD1AR3Su9cohq723orO/..RNJ.5iQFEtXPigCDUK.8NVBv.BriNQu"),
+        ("", "$2b$04$TF/ujMqfErJ9YXavYo/opeE41e3mrWiQlIJYszLxP/NThI1IPkKb2"),
+    ];
+
+    #[test]
+    fn the_players_bcrypt_gives_exactly_the_hash_the_server_stored() {
+        for (password, stored) in SERVER_HASHES {
+            assert_eq!(&bcrypt_proof(password, &stored[..29]).unwrap(), stored, "password {:?}", password);
+        }
+    }
+
+    #[test]
+    fn a_wrong_password_gives_a_different_hash_and_odd_salts_are_errors() {
+        let (password, stored) = SERVER_HASHES[0];
+        assert_ne!(bcrypt_proof("not it", &stored[..29]).unwrap(), stored);
+        assert_eq!(bcrypt_proof(password, stored).unwrap(), stored, "the whole hash works too: only the salt part is used");
+        for bad in ["", "$2b$10$", "$2b$10$short", "2b$10$hdDLG02//jr3zVg1aqif/.", "$9z$10$hdDLG02//jr3zVg1aqif/.", "$2b$31$hdDLG02//jr3zVg1aqif/.", "$2b$03$hdDLG02//jr3zVg1aqif/.", "$2b$xx$hdDLG02//jr3zVg1aqif/.", "$2b$10$hdDLG02//jr3zVg1aqif!!"] {
+            assert!(bcrypt_proof("pw", bad).is_err(), "{:?} should be refused", bad);
+        }
+    }
+
+    #[test]
+    fn an_old_account_upgrades_without_the_password_leaving_the_player() {
+        let (password, stored) = SERVER_HASHES[1];
+        let (mut login, field) = SecureLogin::begin("Alice", password).unwrap();
+        assert!(field.starts_with(LOGON_PREFIX));
+        // The server's half: no record yet, only the hash, so it sends the salt and later checks the proof.
+        let migrate = login.answer_legacy(&stored[..29]).unwrap();
+        let (proof, request) = migrate.split_once('|').unwrap();
+        assert_eq!(proof, stored, "the server can compare this with what it stored");
+        assert!(!migrate.contains(password));
+        let setup = rotl_opaque::server_setup_new();
+        let response = rotl_opaque::server_registration_start(&setup, &STANDARD.decode(request).unwrap(), "Alice").unwrap();
+        assert!(!login.is_established());
+        let upload = login.answer_register_response(&STANDARD.encode(&response)).unwrap();
+        assert!(login.is_established());
+        let record = rotl_opaque::server_registration_finish(&STANDARD.decode(upload).unwrap()).unwrap();
+        // And the record works for a normal secure login afterwards.
+        let (mut again, field) = SecureLogin::begin("Alice", password).unwrap();
+        let (challenge, state) = server_answers(&setup, Some(&record), "Alice", &field);
+        let finish = again.answer_challenge(&challenge).unwrap();
+        assert!(rotl_opaque::server_login_finish(&state, &STANDARD.decode(finish).unwrap(), "Alice").is_ok());
+    }
+
+    #[test]
+    fn upgrade_steps_out_of_order_or_damaged_are_errors() {
+        let (mut login, _) = SecureLogin::begin("Alice", "pw").unwrap();
+        assert!(login.answer_register_response("AAAA").is_err(), "no registration was started");
+        assert!(login.answer_legacy("not a salt").is_err());
+        login.answer_legacy(&SERVER_HASHES[0].1[..29]).unwrap();
+        assert!(login.answer_register_response("not base64 !!").is_err());
+        assert!(!login.is_established());
+    }
     fn as_str(d: &StaticDatum) -> &str { match d { StaticDatum::String(s) => s, _ => panic!("not a string") } }
 
     /// Registers an account the way the server will, and returns (server secret, stored record).

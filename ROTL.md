@@ -55,6 +55,10 @@ password is checked here, so the server, the CDN in front of it and every log on
 into it. The messages the movie puts the password in (`LoadChar2`, `LoginAuth`) are rewritten on their way out. The movie
 sees none of this.
 
+An account that only has an old bcrypt hash upgrades itself the first time: the server sends the hash's salt, the player
+computes the hash locally (`bcrypt`, checked against hashes made by the server's own library) and proves it, then
+registers an OPAQUE record, so even that step never sends the password.
+
 ```bash
 npm run build-vm-secure          # the same as build-vm, with the feature on
 ```
