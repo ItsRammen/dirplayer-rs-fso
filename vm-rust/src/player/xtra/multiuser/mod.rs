@@ -2,6 +2,8 @@ pub mod blowfish;
 pub mod writer;
 pub mod reader;
 pub mod types;
+#[cfg(feature = "rotl-secure-login")]
+pub mod secure_login;
 
 use std::collections::VecDeque;
 use async_std::{channel::Sender, task::spawn_local};
@@ -49,6 +51,12 @@ pub struct MultiuserXtraInstance {
     pub connection_mode: MultiuserConnectionMode,
     pub sender_id: String,
     pub recv_buffer: Vec<u8>,
+    /// Set when this connection logs in with OPAQUE instead of sending the password (see `secure_login`).
+    #[cfg(feature = "rotl-secure-login")]
+    pub secure_login: Option<secure_login::SecureLogin>,
+    /// A character-creation message held while its password is registered (sent as soon as the server has answered).
+    #[cfg(feature = "rotl-secure-login")]
+    pub held_create: Option<MultiuserMessage>,
 }
 
 impl MultiuserXtraInstance {
@@ -60,7 +68,73 @@ impl MultiuserXtraInstance {
         }
     }
 
+    /// The server's answer to an OPAQUE login is for this Xtra, not the movie: it is consumed here, and the last step
+    /// goes straight back. Anything the movie will see has the hash it sent in `LoginAuth` put back first.
+    #[cfg(feature = "rotl-secure-login")]
+    fn send_to_server(&self, subject: &str, content: String) {
+        if let Some(tx) = &self.socket_tx {
+            let message = MultiuserMessage {
+                error_code: 0,
+                recipients: vec!["System".to_string()],
+                sender_id: self.sender_id.clone(),
+                subject: subject.to_string(),
+                content: StaticDatum::String(content),
+                time_stamp: 0,
+            };
+            let _ = tx.try_send(message.to_bytes(None));
+        }
+    }
+
+    /// The server's steps of an OPAQUE login are for this Xtra, not the movie: they are consumed here and answered at
+    /// once. Anything the movie will see has the hash it sent in `LoginAuth` put back first.
+    #[cfg(feature = "rotl-secure-login")]
+    fn handle_secure_login(&mut self, message: &mut MultiuserMessage) -> bool {
+        use secure_login::*;
+        let Some(secure) = self.secure_login.as_mut() else { return false };
+        let content = match &message.content {
+            StaticDatum::String(text) => text.clone(),
+            _ => String::new(),
+        };
+        // A wrong password (or any step that cannot be completed) ends here, on this side. The server is sent an empty
+        // answer, so it counts the failed attempt and answers the movie as it does for a wrong password today.
+        let step = |outcome: Result<String, String>| match outcome {
+            Ok(answer) => answer,
+            Err(why) => {
+                multiuser_log!("Multiuser: secure login did not complete: {}", why);
+                String::new()
+            }
+        };
+        let (reply_subject, answer) = match message.subject.as_str() {
+            SUBJECT_CHALLENGE => (SUBJECT_FINISH, step(secure.answer_challenge(&content))),
+            SUBJECT_LEGACY => (SUBJECT_MIGRATE, step(secure.answer_legacy(&content))),
+            SUBJECT_REGISTER_RESPONSE => (SUBJECT_REGISTER_FINISH, step(secure.answer_register_response(&content))),
+            SUBJECT_CREATE_RESPONSE => {
+                let answer = step(secure.answer_create_response(&content));
+                self.send_to_server(SUBJECT_CREATE_FINISH, answer);
+                // The creation message goes straight after the registration, in that order.
+                if let (Some(held), Some(tx)) = (self.held_create.take(), &self.socket_tx) {
+                    let _ = tx.try_send(held.to_bytes(None));
+                }
+                return true;
+            }
+            _ => {
+                secure.restore_incoming(&message.subject, &mut message.content);
+                return false;
+            }
+        };
+        self.send_to_server(reply_subject, answer);
+        true
+    }
+
     pub fn dispatch_message(&mut self, message: MultiuserMessage) {
+        #[cfg(feature = "rotl-secure-login")]
+        let message = {
+            let mut message = message;
+            if self.handle_secure_login(&mut message) {
+                return;
+            }
+            message
+        };
         self.message_queue.push(message);
         self.dispatch_message_handler();
     }
@@ -121,6 +195,10 @@ impl MultiuserXtraManager {
                 connection_mode: MultiuserConnectionMode::Binary,
                 sender_id: String::new(),
                 recv_buffer: Vec::new(),
+                #[cfg(feature = "rotl-secure-login")]
+                secure_login: None,
+                #[cfg(feature = "rotl-secure-login")]
+                held_create: None,
             },
         );
         self.instance_counter
@@ -223,6 +301,11 @@ impl MultiuserXtraManager {
                 let window_secure = web_sys::window()
                     .and_then(|w| w.location().protocol().ok())
                     .map_or(false, |p| p == "https:");
+                // Log in without sending the password, when this build has it and the page asks for it.
+                #[cfg(feature = "rotl-secure-login")]
+                let secure_requested = reserve_player_ref(|player| {
+                    player.external_params.get("secure_login").is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                });
                 let (ws_path, ws_secure) = reserve_player_ref(|player| {
                     (
                         player.external_params.get("multiuser_websocket_path").cloned(),
@@ -446,6 +529,32 @@ impl MultiuserXtraManager {
                         time_stamp: 0, // TODO timestamp
                     });
                     if let MultiuserConnectionMode::Binary = instance.connection_mode {
+                        // What goes where the password would be: the password, or (secure login) a public request.
+                        #[cfg(feature = "rotl-secure-login")]
+                        let password_field = if secure_requested {
+                            match secure_login::SecureLogin::begin(&username, &password) {
+                                Ok((login, field)) => {
+                                    instance.secure_login = Some(login);
+                                    field
+                                }
+                                Err(why) => {
+                                    multiuser_log!("Multiuser: secure login could not start: {}", why);
+                                    instance.dispatch_message(MultiuserMessage {
+                                        error_code: -1,
+                                        recipients: vec![],
+                                        sender_id: "System".to_string(),
+                                        subject: "ConnectToNetServer".to_string(),
+                                        content: StaticDatum::String("Secure login could not start".to_string()),
+                                        time_stamp: 0,
+                                    });
+                                    return;
+                                }
+                            }
+                        } else {
+                            password.clone()
+                        };
+                        #[cfg(not(feature = "rotl-secure-login"))]
+                        let password_field = password.clone();
                         let message = MultiuserMessage {
                             error_code: 0,
                             recipients: vec!["System".to_string()],
@@ -454,7 +563,7 @@ impl MultiuserXtraManager {
                             content: StaticDatum::List(vec![
                                 StaticDatum::String(movie_id.clone()),
                                 StaticDatum::String(username.clone()),
-                                StaticDatum::String(password.clone()),
+                                StaticDatum::String(password_field),
                             ]),
                             time_stamp: 0,
                         };
@@ -604,10 +713,22 @@ impl MultiuserXtraManager {
                                     return Err(ScriptError::new("sendNetMessage: missing subject".to_string()));
                                 };
                                 let subject = player.get_datum(subject_ref).string_value()?;
-                                let content = match &content_ref {
+                                #[cfg_attr(not(feature = "rotl-secure-login"), allow(unused_mut))]
+                                let mut content = match &content_ref {
                                     Some(r) => StaticDatum::from(player.get_datum(r)),
                                     None => StaticDatum::Void,
                                 };
+                                // With a secure login the password stays on this side: the messages the movie puts it
+                                // in are rewritten on their way out.
+                                #[cfg(feature = "rotl-secure-login")]
+                                let mut start_create: Option<String> = None;
+                                #[cfg(feature = "rotl-secure-login")]
+                                if let Some(secure) = instance.secure_login.as_mut() {
+                                    secure.redact_outgoing(&subject, &mut content);
+                                    if let secure_login::Outgoing::StartCreate(start) = secure.prepare_outgoing(&subject, &mut content) {
+                                        start_create = Some(start);
+                                    }
+                                }
                                 let void = Datum::Void;
                                 let recipients_datum = match &recipients_ref {
                                     Some(r) => player.get_datum(r),
@@ -628,6 +749,14 @@ impl MultiuserXtraManager {
                                     content,
                                     time_stamp: 0,
                                 };
+                                // A new character's password is registered first: hold this message (the password is
+                                // already out of it) and send the registration's first step in its place.
+                                #[cfg(feature = "rotl-secure-login")]
+                                if let Some(start) = start_create {
+                                    instance.held_create = Some(message);
+                                    instance.send_to_server(secure_login::SUBJECT_CREATE, start);
+                                    return Ok(DatumRef::Void);
+                                }
                                 message.to_bytes(None)
                             }
                         };

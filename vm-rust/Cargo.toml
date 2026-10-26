@@ -14,9 +14,16 @@ crate-type = ["cdylib", "rlib"]
 default = ["console_error_panic_hook"]
 word_hard_break = []
 alloc-debug-overlay = []
+# Return of the Legends: log in with OPAQUE so the password never leaves the player (see ../rotl-opaque and
+# docs/secure-login-protocol.md in NodeJS-ROTL). Off by default; a build without it contains none of the cryptography.
+rotl-secure-login = ["dep:rotl-opaque", "dep:bcrypt"]
 
 [dependencies]
 wasm-bindgen = "=0.2.108"
+rotl-opaque = { path = "../rotl-opaque", optional = true, default-features = false }
+# Upgrading an account that still has a bcrypt hash: the player computes the hash from the server's salt and proves it,
+# so the password itself is never sent.
+bcrypt = { version = "0.17", optional = true, default-features = false, features = ["alloc"] }
 
 # Insertion-ordered map. `externalParamName(n)` / `externalParamValue(n)` are
 # INDEXED accessors in Director — the params keep the order the host handed

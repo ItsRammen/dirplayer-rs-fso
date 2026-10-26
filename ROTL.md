@@ -46,3 +46,33 @@ before tagging.
 GPL-3.0, as upstream (see `LICENSE`). Anyone serving the built polyfill to
 players must offer this source; linking this repository from the game page
 does that.
+
+## Secure login (optional build feature)
+
+With `--features rotl-secure-login` the Multiuser Xtra logs in with OPAQUE: the movie still passes its password to
+`connectToNetServer`, but the password is never sent. The `Logon` carries a public request, the server answers, and the
+password is checked here, so the server, the CDN in front of it and every log only see values that can't be turned back
+into it. The messages the movie puts the password in (`LoadChar2`, `LoginAuth`) are rewritten on their way out. The movie
+sees none of this.
+
+An account that only has an old bcrypt hash upgrades itself the first time: the server sends the hash's salt, the player
+computes the hash locally (`bcrypt`, checked against hashes made by the server's own library) and proves it, then
+registers an OPAQUE record, so even that step never sends the password.
+
+```bash
+npm run build-vm-secure          # the same as build-vm, with the feature on
+```
+
+Creating a character goes through the same Xtra: the creation message is held, the new password is registered with the
+server (`OpaqueCreate`, `OpaqueCreateResponse`, `OpaqueCreateFinish`), and the message leaves with a marker where the
+password was. The account is secure-login only and has no password hash at all.
+
+A build without the feature contains none of the cryptography and behaves exactly as before. A build with it still
+logs in the old way unless the page sets the external param `secure_login=1`, so one build can serve both kinds of
+server. `rotl-opaque/` is a copy of the crate in the (private) NodeJS-ROTL repo, which owns it and the server half;
+`scripts/check-rotl-opaque.sh` verifies the copy has not drifted. The wire protocol is in NodeJS-ROTL's
+`docs/secure-login-protocol.md`. The logic is in `vm-rust/src/player/xtra/multiuser/secure_login.rs`, with native tests:
+
+```bash
+cd vm-rust && cargo test --lib --features rotl-secure-login secure_login
+```
