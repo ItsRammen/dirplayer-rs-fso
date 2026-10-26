@@ -59,6 +59,21 @@ pub struct MultiuserXtraInstance {
     pub held_create: Option<MultiuserMessage>,
 }
 
+/// The one-use game ticket the website's account page left for this character (`window.rotlLoginTicket = {name, ticket}`),
+/// if any. Taken, so it cannot be used again, and only for the character it was made for.
+#[cfg(feature = "rotl-secure-login")]
+fn take_login_ticket(username: &str) -> Option<String> {
+    let window = web_sys::window()?;
+    let holder = js_sys::Reflect::get(&window, &"rotlLoginTicket".into()).ok()?;
+    if holder.is_undefined() || holder.is_null() {
+        return None;
+    }
+    let _ = js_sys::Reflect::set(&window, &"rotlLoginTicket".into(), &wasm_bindgen::JsValue::UNDEFINED);
+    let name = js_sys::Reflect::get(&holder, &"name".into()).ok()?.as_string()?;
+    let ticket = js_sys::Reflect::get(&holder, &"ticket".into()).ok()?.as_string()?;
+    if name.eq_ignore_ascii_case(username) { Some(ticket) } else { None }
+}
+
 impl MultiuserXtraInstance {
     pub fn dispatch_message_handler(&self) {
         if let Some((handler_obj_ref, handler_symbol)) = &self.net_message_handler {
@@ -532,7 +547,12 @@ impl MultiuserXtraManager {
                         // What goes where the password would be: the password, or (secure login) a public request.
                         #[cfg(feature = "rotl-secure-login")]
                         let password_field = if secure_requested {
-                            match secure_login::SecureLogin::begin(&username, &password) {
+                            // "Continue as ...": the page leaves a one-use ticket for this character; otherwise a normal login.
+                            let begun = match take_login_ticket(&username) {
+                                Some(ticket) => secure_login::SecureLogin::with_ticket(&username, &password, &ticket),
+                                None => secure_login::SecureLogin::begin(&username, &password),
+                            };
+                            match begun {
                                 Ok((login, field)) => {
                                     instance.secure_login = Some(login);
                                     field

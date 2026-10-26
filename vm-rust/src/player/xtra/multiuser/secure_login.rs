@@ -16,6 +16,9 @@ use crate::director::static_datum::StaticDatum;
 
 /// What the third item of the `Logon` starts with when it carries a login request instead of a password.
 pub const LOGON_PREFIX: &str = "OPAQUE1:";
+/// What the third item of the `Logon` starts with when it carries a one-use game ticket from the website's account page
+/// (the player is already signed in there), instead of a login request.
+pub const TICKET_PREFIX: &str = "TICKET1:";
 /// Server → player: the server's answer to the login request. Consumed by the Xtra.
 pub const SUBJECT_CHALLENGE: &str = "OpaqueLogin";
 /// Player → server: the last step of the login (empty content when the password turned out wrong).
@@ -49,6 +52,8 @@ pub struct SecureLogin {
     /// While an old account is being upgraded: where the registration stands.
     registration: Option<Vec<u8>>,
     upgraded: bool,
+    /// Logged in with a game ticket: the server proved nothing more is needed, so there is no challenge to answer.
+    ticketed: bool,
     /// While a new character's password is being registered.
     creation: Option<Creation>,
 }
@@ -73,8 +78,21 @@ impl SecureLogin {
         let started = rotl_opaque::client_login_start(password.as_bytes()).map_err(|e| e.to_string())?;
         let field = format!("{}{}", LOGON_PREFIX, STANDARD.encode(&started.request));
         Ok((
-            SecureLogin { username: username.to_string(), password: password.to_string(), state: started.state, session_key: None, hash_token: None, registration: None, upgraded: false, creation: None },
+            SecureLogin { username: username.to_string(), password: password.to_string(), state: started.state, session_key: None, hash_token: None, registration: None, upgraded: false, ticketed: false, creation: None },
             field,
+        ))
+    }
+
+    /// Starts a login with a game ticket the website's account page handed over. The movie's own password is only a
+    /// stand-in (it is never sent, and later messages that would carry it are redacted as in any secure login).
+    /// Returns it and what to put in the `Logon` where the password would be.
+    pub fn with_ticket(username: &str, password: &str, ticket: &str) -> Result<(SecureLogin, String), String> {
+        if ticket.len() != 43 || !ticket.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            return Err("the game ticket is not valid".to_string());
+        }
+        Ok((
+            SecureLogin { username: username.to_string(), password: password.to_string(), state: Vec::new(), session_key: None, hash_token: None, registration: None, upgraded: false, ticketed: true, creation: None },
+            format!("{}{}", TICKET_PREFIX, ticket),
         ))
     }
 
@@ -89,7 +107,7 @@ impl SecureLogin {
     }
 
     pub fn is_established(&self) -> bool {
-        self.session_key.is_some() || self.upgraded
+        self.session_key.is_some() || self.upgraded || self.ticketed
     }
 
     /// The server says this account has only a bcrypt hash. Works out that hash here from the salt the server sent and
@@ -351,6 +369,30 @@ mod tests {
         let request = STANDARD.decode(logon_field.strip_prefix(LOGON_PREFIX).expect("a request, not a password")).unwrap();
         let started = rotl_opaque::server_login_start(setup, record, &request, user).unwrap();
         (STANDARD.encode(&started.response), started.state)
+    }
+
+    #[test]
+    fn a_game_ticket_goes_in_the_logon_in_place_of_the_password_and_the_rest_is_redacted_as_usual() {
+        let ticket = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLM_-12";
+        assert_eq!(ticket.len(), 43);
+        let (mut login, field) = SecureLogin::with_ticket("Oldtimer", "stand-in", ticket).unwrap();
+        assert_eq!(field, format!("TICKET1:{ticket}"));
+        assert!(!field.contains("stand-in"));
+        assert!(login.is_established(), "there is no challenge to answer");
+        // The movie's own messages still must not carry what it thinks the password is.
+        let mut load = text("Oldtimer:stand-in:23");
+        login.redact_outgoing("LoadChar2", &mut load);
+        assert_eq!(as_str(&load), "Oldtimer:*opaque*:23");
+        let mut auth = text("1:somehashfromthemovie");
+        login.redact_outgoing("LoginAuth", &mut auth);
+        assert!(as_str(&auth).starts_with("1:~") && !as_str(&auth).contains("somehash"));
+    }
+
+    #[test]
+    fn a_game_ticket_of_the_wrong_shape_is_refused_and_nothing_goes_out() {
+        for bad in ["", "short", &"x".repeat(44), &format!("{}!", "x".repeat(42)), &format!("{} ", "x".repeat(42))] {
+            assert!(SecureLogin::with_ticket("Oldtimer", "p", bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
