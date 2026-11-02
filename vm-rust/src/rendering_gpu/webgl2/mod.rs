@@ -1674,6 +1674,8 @@ impl WebGL2Renderer {
                 word_wrap: bool,
                 border: u16,
                 box_drop_shadow: u16,
+                /// The member's text drop shadow, in pixels (FieldInfo `text_shadow`): a black copy of the text offset down and right.
+                text_shadow: u16,
                 /// Scrollbar geometry for a #scroll field, with the `scrollTop`
                 /// the lift should sit at. `None` for every other member.
                 scrollbar: Option<(crate::player::score::FieldScrollbar, i32)>,
@@ -2185,6 +2187,7 @@ impl WebGL2Renderer {
                         word_wrap: false,
                         border: 0,
                         box_drop_shadow: 0,
+                        text_shadow: 0,
                         scrollbar: None,
                         tab_stops: Vec::new(),
                         per_line_spacings: Vec::new(),
@@ -2828,6 +2831,7 @@ impl WebGL2Renderer {
                         word_wrap: effective_word_wrap,
                         border: 0,
                         box_drop_shadow: 0,
+                        text_shadow: 0,
                         scrollbar: None,
                         tab_stops: text_member.tab_stops.clone(),
                         per_line_spacings,
@@ -3242,6 +3246,7 @@ impl WebGL2Renderer {
                         word_wrap: field_member.word_wrap,
                         border: field_member.border,
                         box_drop_shadow: field_member.box_drop_shadow,
+                        text_shadow: field_member.drop_shadow,
                         scrollbar: scrollbar_info,
                         tab_stops: Vec::new(),
                         per_line_spacings: Vec::new(),
@@ -3680,6 +3685,7 @@ impl WebGL2Renderer {
                 word_wrap,
                 border,
                 box_drop_shadow,
+                text_shadow,
                 scrollbar,
                 ref tab_stops,
                 ref per_line_spacings,
@@ -3745,6 +3751,7 @@ impl WebGL2Renderer {
                         word_wrap,
                         border,
                         box_drop_shadow,
+                        text_shadow,
                         scrollbar,
                         tab_stops,
                         per_line_spacings.as_slice(),
@@ -5906,6 +5913,7 @@ impl WebGL2Renderer {
         word_wrap: bool,
         border: u16,
         box_drop_shadow: u16,
+        text_shadow: u16,
         scrollbar: Option<(crate::player::score::FieldScrollbar, i32)>,
         tab_stops: &[crate::player::cast_member::TabStop],
         // Per-text-line line_spacing override from XMED par_run / par_info
@@ -7681,6 +7689,25 @@ impl WebGL2Renderer {
                     8,
                 );
                 text_bitmap.fill_rect(dx, cy, dx + 1, cy + font.char_height as i32, caret_rgb, &palettes, 1.0);
+            }
+        }
+
+        // The text's own drop shadow (Courier labels over the players' heads have one): a black copy of every drawn pixel, one step down and
+        // right, under the text.
+        if text_shadow > 0 && text_bitmap.data.len() == (render_width * render_height * 4) as usize {
+            let (w, h, s) = (render_width as i32, render_height as i32, text_shadow as i32);
+            let src = text_bitmap.data.clone();
+            for y in 0..h {
+                for x in 0..w {
+                    let a = src[((y * w + x) * 4 + 3) as usize];
+                    if a == 0 { continue; }
+                    let (dx, dy) = (x + s, y + s);
+                    if dx >= w || dy >= h { continue; }
+                    let d = ((dy * w + dx) * 4) as usize;
+                    if src[d + 3] < a && text_bitmap.data[d + 3] < a {
+                        text_bitmap.data[d] = 0; text_bitmap.data[d + 1] = 0; text_bitmap.data[d + 2] = 0; text_bitmap.data[d + 3] = a;
+                    }
+                }
             }
         }
 
