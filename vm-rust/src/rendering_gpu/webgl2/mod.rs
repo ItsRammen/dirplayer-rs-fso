@@ -1674,6 +1674,8 @@ impl WebGL2Renderer {
                 word_wrap: bool,
                 border: u16,
                 box_drop_shadow: u16,
+                /// The member's text drop shadow, in pixels (FieldInfo `text_shadow`): a black copy of the text offset down and right.
+                text_shadow: u16,
                 /// Scrollbar geometry for a #scroll field, with the `scrollTop`
                 /// the lift should sit at. `None` for every other member.
                 scrollbar: Option<(crate::player::score::FieldScrollbar, i32)>,
@@ -2185,6 +2187,7 @@ impl WebGL2Renderer {
                         word_wrap: false,
                         border: 0,
                         box_drop_shadow: 0,
+                        text_shadow: 0,
                         scrollbar: None,
                         tab_stops: Vec::new(),
                         per_line_spacings: Vec::new(),
@@ -2483,12 +2486,8 @@ impl WebGL2Renderer {
                     let text_fg_color = match &text_fg_color {
                         ColorRef::PaletteIndex(_) => {
                             let palettes = player.movie.cast_manager.palettes();
-                            let (r, g, b) = resolve_color_ref(
-                                &palettes,
-                                &text_fg_color,
-                                &PaletteRef::BuiltIn(get_system_default_palette()),
-                                8,
-                            );
+                            let frame_palette = player.movie.score.get_frame_palette(player.movie.current_frame);
+                            let (r, g, b) = crate::player::bitmap::bitmap::resolve_sprite_color(&palettes, &text_fg_color, &frame_palette);
                             ColorRef::Rgb(r, g, b)
                         }
                         _ => text_fg_color,
@@ -2832,6 +2831,7 @@ impl WebGL2Renderer {
                         word_wrap: effective_word_wrap,
                         border: 0,
                         box_drop_shadow: 0,
+                        text_shadow: 0,
                         scrollbar: None,
                         tab_stops: text_member.tab_stops.clone(),
                         per_line_spacings,
@@ -3246,6 +3246,7 @@ impl WebGL2Renderer {
                         word_wrap: field_member.word_wrap,
                         border: field_member.border,
                         box_drop_shadow: field_member.box_drop_shadow,
+                        text_shadow: field_member.drop_shadow,
                         scrollbar: scrollbar_info,
                         tab_stops: Vec::new(),
                         per_line_spacings: Vec::new(),
@@ -3500,16 +3501,12 @@ impl WebGL2Renderer {
         let palettes = player.movie.cast_manager.palettes();
         // Sprite colors are indexed in the current movie palette, not the
         // member's custom palette (including indexed recolored mobs).
-        let (bg_color_rgb, fg_color_rgb) = if matches!(texture_source, TextureSource::Bitmap { .. }) {
+        let (bg_color_rgb, fg_color_rgb) = {
+            // Every kind of sprite (bitmap, text, field, shape) names its colours in the movie's current palette.
             let frame_palette = player.movie.score.get_frame_palette(player.movie.current_frame);
             (
                 crate::player::bitmap::bitmap::resolve_sprite_color(&palettes, &bg_color, &frame_palette),
                 crate::player::bitmap::bitmap::resolve_sprite_color(&palettes, &fg_color, &frame_palette),
-            )
-        } else {
-            (
-                resolve_color_ref(&palettes, &bg_color, &bitmap_palette_ref, bitmap_bit_depth),
-                resolve_color_ref(&palettes, &fg_color, &bitmap_palette_ref, bitmap_bit_depth),
             )
         };
 
@@ -3688,6 +3685,7 @@ impl WebGL2Renderer {
                 word_wrap,
                 border,
                 box_drop_shadow,
+                text_shadow,
                 scrollbar,
                 ref tab_stops,
                 ref per_line_spacings,
@@ -3753,6 +3751,7 @@ impl WebGL2Renderer {
                         word_wrap,
                         border,
                         box_drop_shadow,
+                        text_shadow,
                         scrollbar,
                         tab_stops,
                         per_line_spacings.as_slice(),
@@ -5914,6 +5913,7 @@ impl WebGL2Renderer {
         word_wrap: bool,
         border: u16,
         box_drop_shadow: u16,
+        text_shadow: u16,
         scrollbar: Option<(crate::player::score::FieldScrollbar, i32)>,
         tab_stops: &[crate::player::cast_member::TabStop],
         // Per-text-line line_spacing override from XMED par_run / par_info
@@ -5934,6 +5934,19 @@ impl WebGL2Renderer {
         par_runs_for_native: &[crate::director::chunks::xmedia_styled_text::ParRun],
         char_spacing: i32,
     ) -> Option<(web_sys::WebGlTexture, u32, u32)> {
+        // A palette index in the text colour is an entry of the movie's current palette (the score's palette channel), as for sprite
+        // colours: ROTL draws its chat, names and labels with indexes into its own palette, which the system palette shows wrong (9 is
+        // red in the movie's palette and pale orange in the system's). Turned into RGB here, so everything below sees real colours.
+        let fg_in_frame_palette;
+        let fg_color: &ColorRef = if let ColorRef::PaletteIndex(_) = fg_color {
+            let palettes = player.movie.cast_manager.palettes();
+            let frame_palette = player.movie.score.get_frame_palette(player.movie.current_frame);
+            let (r, g, b) = crate::player::bitmap::bitmap::resolve_sprite_color(&palettes, fg_color, &frame_palette);
+            fg_in_frame_palette = ColorRef::Rgb(r, g, b);
+            &fg_in_frame_palette
+        } else {
+            fg_color
+        };
         // Whether to keep the bitmap at the authored height (no shrink-to-
         // content, no fill-scaling). True when the sprite carries a skew or
         // rotation; the texture must match the authored sprite_rect 1:1 so
@@ -7676,6 +7689,25 @@ impl WebGL2Renderer {
                     8,
                 );
                 text_bitmap.fill_rect(dx, cy, dx + 1, cy + font.char_height as i32, caret_rgb, &palettes, 1.0);
+            }
+        }
+
+        // The text's own drop shadow (Courier labels over the players' heads have one): a black copy of every drawn pixel, one step down and
+        // right, under the text.
+        if text_shadow > 0 && text_bitmap.data.len() == (render_width * render_height * 4) as usize {
+            let (w, h, s) = (render_width as i32, render_height as i32, text_shadow as i32);
+            let src = text_bitmap.data.clone();
+            for y in 0..h {
+                for x in 0..w {
+                    let a = src[((y * w + x) * 4 + 3) as usize];
+                    if a == 0 { continue; }
+                    let (dx, dy) = (x + s, y + s);
+                    if dx >= w || dy >= h { continue; }
+                    let d = ((dy * w + dx) * 4) as usize;
+                    if src[d + 3] < a && text_bitmap.data[d + 3] < a {
+                        text_bitmap.data[d] = 0; text_bitmap.data[d + 1] = 0; text_bitmap.data[d + 2] = 0; text_bitmap.data[d + 3] = a;
+                    }
+                }
             }
         }
 

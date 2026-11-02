@@ -1627,12 +1627,10 @@ impl TextMemberHandlers {
                     let (r, g, b) = {
                         use crate::player::bitmap::bitmap::resolve_color_ref;
                         let palettes = player.movie.cast_manager.palettes();
-                        resolve_color_ref(
-                            &palettes,
-                            &member.color,
-                            &bitmap.palette_ref,
-                            bitmap.original_bit_depth,
-                        )
+                        // A palette index is an entry of the movie's current palette (as for sprite colours), not of the system palette.
+                        let frame_palette = player.movie.score.get_frame_palette(player.movie.current_frame);
+                        let _ = resolve_color_ref;
+                        crate::player::bitmap::bitmap::resolve_sprite_color(&palettes, &member.color, &frame_palette)
                     };
                     let default_color_u32 = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
                     let default_bold = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Bold);
@@ -1713,7 +1711,7 @@ impl TextMemberHandlers {
                         let (dr, dg, db) = {
                             use crate::player::bitmap::bitmap::resolve_color_ref;
                             let palettes = player.movie.cast_manager.palettes();
-                            resolve_color_ref(&palettes, &member.color, &bitmap.palette_ref, bitmap.original_bit_depth)
+                            crate::player::bitmap::bitmap::resolve_sprite_color(&palettes, &member.color, &player.movie.score.get_frame_palette(player.movie.current_frame))
                         };
                         let default_style = OutlineCharStyle {
                             color: (dr, dg, db),
@@ -1801,11 +1799,10 @@ impl TextMemberHandlers {
                     use crate::player::bitmap::bitmap::resolve_color_ref;
                     use crate::player::font::{bitmap_font_copy_char, bitmap_font_copy_char_tight};
 
-                    let text_color = resolve_color_ref(
+                    let text_color = crate::player::bitmap::bitmap::resolve_sprite_color(
                         &palettes,
                         &params.color,
-                        &bitmap.palette_ref,
-                        bitmap.original_bit_depth,
+                        &player.movie.score.get_frame_palette(player.movie.current_frame),
                     );
                     let default_bold = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Bold);
                     let default_italic = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Italic);

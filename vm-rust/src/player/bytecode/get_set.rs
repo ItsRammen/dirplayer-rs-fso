@@ -393,9 +393,12 @@ impl GetSetBytecodeHandler {
                                     Datum::Float(f) => Some(ColorRef::PaletteIndex(*f as u8)),
                                     other => other.to_color_ref().ok().cloned(),
                                 };
+                                // A palette index is an entry of the movie's CURRENT palette (the score's palette channel), as for
+                                // sprite colours: the system palette shows ROTL's red (9) as pale orange and its orange (41) as green.
                                 let rgb = color_ref.map(|c| {
                                     let palettes = player.movie.cast_manager.palettes();
-                                    resolve_color_ref(&palettes, &c, &PaletteRef::BuiltIn(get_system_default_palette()), 8)
+                                    let frame_palette = player.movie.score.get_frame_palette(player.movie.current_frame);
+                                    crate::player::bitmap::bitmap::resolve_sprite_color(&palettes, &c, &frame_palette)
                                 });
                                 match (rgb, player.movie.cast_manager.find_mut_member_by_ref(&member_ref)) {
                                     (Some(rgb), Some(member)) => {
