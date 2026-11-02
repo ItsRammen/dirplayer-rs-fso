@@ -58,6 +58,19 @@ const SELECTION_COLOR: (u8, u8, u8) = (164, 205, 255);
 /// within a wrapped Field/Text. Math reuses `caret_index_to_xy` so the rects
 /// agree with the rendered glyphs byte-for-byte. `line_h` is the per-line
 /// stride the renderer used (so caret y matches glyph y).
+/// A text colour given as a palette index means an entry of the movie's current palette (the score's palette channel). The stage bitmap
+/// resolves indexes against the system palette, so the index is turned into its RGB here, as sprite colours already are.
+fn text_color_in_frame_palette(player: &DirPlayer, palettes: &PaletteMap, color: ColorRef) -> ColorRef {
+    match color {
+        ColorRef::PaletteIndex(_) => {
+            let frame_palette = player.movie.score.get_frame_palette(player.movie.current_frame);
+            let (r, g, b) = crate::player::bitmap::bitmap::resolve_sprite_color(palettes, &color, &frame_palette);
+            ColorRef::Rgb(r, g, b)
+        }
+        other => other,
+    }
+}
+
 fn draw_text_selection_rects(
     bitmap: &mut Bitmap,
     text: &str,
@@ -2320,6 +2333,8 @@ pub fn render_score_to_bitmap_with_offset(
                     } else {
                         sprite.color.clone()
                     };
+                    // A palette index names an entry of the movie's current palette, not of the system palette.
+                    let text_color = text_color_in_frame_palette(player, &palettes, text_color);
 
                     let params = CopyPixelsParams {
                         blend: sprite.effective_blend() as i32,
@@ -2835,6 +2850,7 @@ pub fn render_score_to_bitmap_with_offset(
                     } else {
                         sprite.color.clone()
                     };
+                    let text_color = text_color_in_frame_palette(player, &palettes, text_color);
 
                     let params = CopyPixelsParams {
                         blend: sprite.effective_blend() as i32,

@@ -2483,12 +2483,8 @@ impl WebGL2Renderer {
                     let text_fg_color = match &text_fg_color {
                         ColorRef::PaletteIndex(_) => {
                             let palettes = player.movie.cast_manager.palettes();
-                            let (r, g, b) = resolve_color_ref(
-                                &palettes,
-                                &text_fg_color,
-                                &PaletteRef::BuiltIn(get_system_default_palette()),
-                                8,
-                            );
+                            let frame_palette = player.movie.score.get_frame_palette(player.movie.current_frame);
+                            let (r, g, b) = crate::player::bitmap::bitmap::resolve_sprite_color(&palettes, &text_fg_color, &frame_palette);
                             ColorRef::Rgb(r, g, b)
                         }
                         _ => text_fg_color,
@@ -3500,16 +3496,12 @@ impl WebGL2Renderer {
         let palettes = player.movie.cast_manager.palettes();
         // Sprite colors are indexed in the current movie palette, not the
         // member's custom palette (including indexed recolored mobs).
-        let (bg_color_rgb, fg_color_rgb) = if matches!(texture_source, TextureSource::Bitmap { .. }) {
+        let (bg_color_rgb, fg_color_rgb) = {
+            // Every kind of sprite (bitmap, text, field, shape) names its colours in the movie's current palette.
             let frame_palette = player.movie.score.get_frame_palette(player.movie.current_frame);
             (
                 crate::player::bitmap::bitmap::resolve_sprite_color(&palettes, &bg_color, &frame_palette),
                 crate::player::bitmap::bitmap::resolve_sprite_color(&palettes, &fg_color, &frame_palette),
-            )
-        } else {
-            (
-                resolve_color_ref(&palettes, &bg_color, &bitmap_palette_ref, bitmap_bit_depth),
-                resolve_color_ref(&palettes, &fg_color, &bitmap_palette_ref, bitmap_bit_depth),
             )
         };
 
@@ -5934,6 +5926,19 @@ impl WebGL2Renderer {
         par_runs_for_native: &[crate::director::chunks::xmedia_styled_text::ParRun],
         char_spacing: i32,
     ) -> Option<(web_sys::WebGlTexture, u32, u32)> {
+        // A palette index in the text colour is an entry of the movie's current palette (the score's palette channel), as for sprite
+        // colours: ROTL draws its chat, names and labels with indexes into its own palette, which the system palette shows wrong (9 is
+        // red in the movie's palette and pale orange in the system's). Turned into RGB here, so everything below sees real colours.
+        let fg_in_frame_palette;
+        let fg_color: &ColorRef = if let ColorRef::PaletteIndex(_) = fg_color {
+            let palettes = player.movie.cast_manager.palettes();
+            let frame_palette = player.movie.score.get_frame_palette(player.movie.current_frame);
+            let (r, g, b) = crate::player::bitmap::bitmap::resolve_sprite_color(&palettes, fg_color, &frame_palette);
+            fg_in_frame_palette = ColorRef::Rgb(r, g, b);
+            &fg_in_frame_palette
+        } else {
+            fg_color
+        };
         // Whether to keep the bitmap at the authored height (no shrink-to-
         // content, no fill-scaling). True when the sprite carries a skew or
         // rotation; the texture must match the authored sprite_rect 1:1 so

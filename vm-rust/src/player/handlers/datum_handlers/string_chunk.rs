@@ -901,15 +901,13 @@ impl StringChunkHandlers {
                         ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
                     }
                     ColorRef::PaletteIndex(_) => {
-                        // Resolve palette index to RGB using the system palette
-                        // so styled-span color (which is a plain u32 RGB) ends
-                        // up matching what the renderer would draw.
+                        // A palette index in Director means an entry of the movie's CURRENT palette (the score's
+                        // palette channel), the same one sprite colours use. Resolving it against the system palette
+                        // shows a chat line set to 9 (red in the movie's palette) as light orange, and so on.
                         let palettes = player.movie.cast_manager.palettes();
-                        let bitmap_palette = crate::player::bitmap::bitmap::PaletteRef::BuiltIn(
-                            crate::player::bitmap::bitmap::get_system_default_palette(),
-                        );
-                        let (r, g, b) = crate::player::bitmap::bitmap::resolve_color_ref(
-                            &palettes, &color_ref, &bitmap_palette, 8,
+                        let frame_palette = player.movie.score.get_frame_palette(player.movie.current_frame);
+                        let (r, g, b) = crate::player::bitmap::bitmap::resolve_sprite_color(
+                            &palettes, &color_ref, &frame_palette,
                         );
                         ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
                     }
