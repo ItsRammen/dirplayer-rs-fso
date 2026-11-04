@@ -47,6 +47,14 @@ GPL-3.0, as upstream (see `LICENSE`). Anyone serving the built polyfill to
 players must offer this source; linking this repository from the game page
 does that.
 
+## Name colours
+
+The movie draws a player's name label in one of three colours. The server can also send a `NameColours` message
+(`name=RRGGBB;name=RRGGBB`, the whole list each time); the Multiuser Xtra keeps it instead of passing it to the movie
+(`vm-rust/src/player/xtra/multiuser/name_colours.rs`). When the movie sets the colour of a name label (a field or text member named
+`Sprite<channel>Name`) the label is given the name's colour if the name is in the list, and a label that still carries such a colour for a
+name that has none is put back to white. No server, or no message, and nothing changes. `cargo test --lib name_colours` covers the parsing.
+
 ## Secure login (optional build feature)
 
 With `--features rotl-secure-login` the Multiuser Xtra logs in with OPAQUE: the movie still passes its password to

@@ -2,6 +2,7 @@ pub mod blowfish;
 pub mod writer;
 pub mod reader;
 pub mod types;
+pub mod name_colours;
 #[cfg(feature = "rotl-secure-login")]
 pub mod secure_login;
 
@@ -142,6 +143,13 @@ impl MultiuserXtraInstance {
     }
 
     pub fn dispatch_message(&mut self, message: MultiuserMessage) {
+        // The server's list of names with a colour of their own is for the player, not the movie (see `name_colours`).
+        if message.subject == name_colours::SUBJECT {
+            if let StaticDatum::String(list) = &message.content {
+                name_colours::replace(list);
+            }
+            return;
+        }
         #[cfg(feature = "rotl-secure-login")]
         let message = {
             let mut message = message;
