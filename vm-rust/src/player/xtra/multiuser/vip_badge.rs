@@ -1,24 +1,178 @@
-//! The VIP badge in chat (ROTL).
+//! The chat badges (ROTL): VIP, MOD and ADMIN.
 //!
-//! The server marks a VIP's chat with the plain tag `[VIP]`, because the connection to the movie carries one byte per character and cannot
-//! carry a star. The movie only prints the line it is given, so this Xtra swaps the tag for a real star (U+2605, which the player's fonts
-//! draw) on its way in. Only the two places the server puts the tag are touched, so a player typing `[VIP]` into their own message is
-//! not turned into a badge:
+//! The server marks a badge holder's chat with a plain tag, `[VIP]`, `[MOD]` or `[ADMIN]`, because the connection to the movie carries one byte
+//! per character and cannot carry a picture. The movie only prints the line it is given, so this Xtra swaps the tag for one character on its
+//! way in (see `Badge::ch`), and the text renderer draws a small picture where that character stands alone as a word. Only the two places the
+//! server puts the tag are touched, so a player typing `[VIP]` into their own message is not turned into a badge:
 //!
-//!   map chat       `255<[12:00:00] [VIP] Ann says "hi"`    ->  `255<[12:00:00] ★ Ann says "hi"`
-//!   a broadcast    `255<Ann [VIP] Broadcasts: "hi"`        ->  `255<Ann ★ Broadcasts: "hi"`
+//!   map chat       `255<[12:00] [VIP] Ann says "hi"`    ->  `255<[12:00] ★ Ann says "hi"`
+//!   a broadcast    `255<Ann [VIP] Broadcasts: "hi"`     ->  `255<Ann ★ Broadcasts: "hi"`
 //!
-//! A player that does not have this module shows the tag as it is.
+//! A renderer that does not draw the picture shows the character, coloured (`style_chat_line`); a player without this module shows the tag.
 
 use crate::player::cast_member::FieldMember;
 
 pub const SUBJECT: &str = "Broadcast";
-const TAG: &str = "[VIP]";
-const STAR: &str = "\u{2605}";
-/// The badge's colour: gold, whatever the colour of the line it is in.
-pub const GOLD: (u8, u8, u8) = (0xF5, 0xC5, 0x42);
 /// The colour of the time in front of a chat line.
 pub const DIM: (u8, u8, u8) = (0x8F, 0x8F, 0x8F);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Badge {
+    Vip,
+    Mod,
+    Admin,
+}
+
+impl Badge {
+    pub const ALL: [Badge; 3] = [Badge::Vip, Badge::Mod, Badge::Admin];
+
+    /// What the server writes.
+    fn tag(self) -> &'static str {
+        match self {
+            Badge::Vip => "[VIP]",
+            Badge::Mod => "[MOD]",
+            Badge::Admin => "[ADMIN]",
+        }
+    }
+
+    /// The one character the badge travels as inside the movie.
+    pub fn ch(self) -> char {
+        match self {
+            Badge::Vip => '\u{2605}',
+            Badge::Mod => '\u{25C6}',
+            Badge::Admin => '\u{25B2}',
+        }
+    }
+
+    /// The words on the picture.
+    fn label(self) -> &'static str {
+        match self {
+            Badge::Vip => "\u{2605} VIP",
+            Badge::Mod => "MOD",
+            Badge::Admin => "ADMIN",
+        }
+    }
+
+    /// Fill, border and letters of the picture.
+    fn paint(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Badge::Vip => ("#E9B93A", "#8B5A1B", "#4A2D0A"),
+            Badge::Mod => ("#6DB3EE", "#1F4E7A", "#0B2540"),
+            Badge::Admin => ("#E8645B", "#7A1F1A", "#3A0B08"),
+        }
+    }
+
+    /// The colour of the character where no picture is drawn.
+    fn fallback(self) -> (u8, u8, u8) {
+        match self {
+            Badge::Vip => (0xF5, 0xC5, 0x42),
+            Badge::Mod => (0x6D, 0xB3, 0xEE),
+            Badge::Admin => (0xE8, 0x64, 0x5B),
+        }
+    }
+}
+
+/// Which badge a word is, if it is just the badge's character.
+pub fn badge_of(token: &str) -> Option<Badge> {
+    let mut chars = token.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    Badge::ALL.into_iter().find(|b| b.ch() == c)
+}
+
+/// The text with each badge character swapped for a few wide letters, to measure a line as the picture will fill it.
+pub fn for_measuring(text: &str) -> String {
+    Badge::ALL.iter().fold(text.to_string(), |t, b| t.replace(b.ch(), "WWW"))
+}
+
+fn badge_font(size_px: f64) -> String {
+    format!("bold {}px Arial, sans-serif", (size_px * 0.72).round().max(7.0))
+}
+
+/// How wide the badge picture is: its letters and a little room round them.
+pub fn badge_width(ctx: &web_sys::CanvasRenderingContext2d, size_px: f64, badge: Badge) -> f64 {
+    ctx.set_font(&badge_font(size_px));
+    let letters = ctx.measure_text(badge.label()).map(|m| m.width()).unwrap_or(size_px * 2.4);
+    (letters + 8.0).ceil()
+}
+
+/// Draws the badge in full colour on a canvas of its own (2x, like the text canvas) and returns its pixels (RGBA) with their size.
+/// `width` is what `badge_width` gave and `size_px` the line's font size; the picture is `ceil(width)` by `ceil(size_px)` pixels at 1x.
+pub fn badge_pixels(document: &web_sys::Document, badge: Badge, width: f64, size_px: f64) -> Option<(Vec<u8>, u32, u32)> {
+    use wasm_bindgen::JsCast;
+    let (w, h) = (width.ceil().max(1.0), size_px.ceil().max(8.0));
+    let canvas: web_sys::HtmlCanvasElement = document.create_element("canvas").ok()?.dyn_into().ok()?;
+    let (cw, ch) = ((w * 2.0) as u32, (h * 2.0) as u32);
+    canvas.set_width(cw);
+    canvas.set_height(ch);
+    let ctx: web_sys::CanvasRenderingContext2d = canvas.get_context("2d").ok()??.dyn_into().ok()?;
+    let _ = ctx.scale(2.0, 2.0);
+    let (fill, border, ink) = badge.paint();
+    // A rounded pill with a 1 px border, a pixel in from the edges so the outline is whole.
+    let (left, top, pw, ph) = (0.5, 1.0, w - 1.0, h - 2.0);
+    let r = 3.0;
+    ctx.begin_path();
+    ctx.move_to(left + r, top);
+    let _ = ctx.arc_to(left + pw, top, left + pw, top + ph, r);
+    let _ = ctx.arc_to(left + pw, top + ph, left, top + ph, r);
+    let _ = ctx.arc_to(left, top + ph, left, top, r);
+    let _ = ctx.arc_to(left, top, left + pw, top, r);
+    ctx.close_path();
+    ctx.set_fill_style_str(fill);
+    ctx.fill();
+    ctx.set_line_width(1.0);
+    ctx.set_stroke_style_str(border);
+    ctx.stroke();
+    ctx.set_font(&badge_font(size_px));
+    ctx.set_text_baseline("middle");
+    ctx.set_text_align("center");
+    ctx.set_fill_style_str(ink);
+    let _ = ctx.fill_text(badge.label(), left + pw / 2.0, top + ph / 2.0 + 0.5);
+    let data = ctx.get_image_data(0.0, 0.0, cw as f64, ch as f64).ok()?.data().0;
+    Some((data, cw, ch))
+}
+
+/// Puts a badge's pixels (from `badge_pixels`, 2x) on a text bitmap (RGBA, 1x) with its top-left at `(dest_x, dest_y)`: each bitmap pixel
+/// takes the average of the 2x2 block above it, so the edges are smooth.
+pub fn composite(bitmap: &mut [u8], bitmap_w: i32, bitmap_h: i32, dest_x: i32, dest_y: i32, pixels: &[u8], pw: u32, ph: u32) {
+    let (out_w, out_h) = ((pw / 2) as i32, (ph / 2) as i32);
+    for oy in 0..out_h {
+        let by = dest_y + oy;
+        if by < 0 || by >= bitmap_h {
+            continue;
+        }
+        for ox in 0..out_w {
+            let bx = dest_x + ox;
+            if bx < 0 || bx >= bitmap_w {
+                continue;
+            }
+            let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 0u32);
+            for sy in 0..2 {
+                for sx in 0..2 {
+                    let i = ((((oy * 2 + sy) as u32) * pw + (ox * 2 + sx) as u32) * 4) as usize;
+                    let alpha = pixels[i + 3] as u32;
+                    // The canvas hands back straight (un-premultiplied) colour: weight it by its alpha to average.
+                    r += pixels[i] as u32 * alpha;
+                    g += pixels[i + 1] as u32 * alpha;
+                    b += pixels[i + 2] as u32 * alpha;
+                    a += alpha;
+                }
+            }
+            if a == 0 {
+                continue;
+            }
+            let at = ((by as usize) * bitmap_w as usize + bx as usize) * 4;
+            if at + 3 < bitmap.len() {
+                bitmap[at] = (r / a) as u8;
+                bitmap[at + 1] = (g / a) as u8;
+                bitmap[at + 2] = (b / a) as u8;
+                bitmap[at + 3] = (a / 4) as u8;
+            }
+        }
+    }
+}
 
 /// The length in bytes of a time like `[18:39]` or `[18:39:04]` at the very start of `line`, if the line starts with one.
 pub fn time_len(line: &str) -> Option<usize> {
@@ -30,69 +184,24 @@ pub fn time_len(line: &str) -> Option<usize> {
     ok.then_some(end + 2)
 }
 
-/// The character the badge travels as; the text renderer draws a picture where it stands alone as a word.
-pub const BADGE_CHAR: char = '\u{2605}';
-
-/// A word that is just the badge character.
-pub fn is_badge(token: &str) -> bool {
-    let mut chars = token.chars();
-    chars.next() == Some(BADGE_CHAR) && chars.next().is_none()
-}
-
-fn badge_font(size_px: f64) -> String {
-    format!("bold {}px Arial, sans-serif", (size_px * 0.72).round().max(7.0))
-}
-
-/// How wide the badge picture is: its letters and a little room round them.
-pub fn badge_width(ctx: &web_sys::CanvasRenderingContext2d, size_px: f64) -> f64 {
-    ctx.set_font(&badge_font(size_px));
-    let letters = ctx.measure_text("\u{2605} VIP").map(|m| m.width()).unwrap_or(size_px * 2.4);
-    (letters + 6.0).ceil()
-}
-
-/// Draws the badge on the coverage canvas (white on black; the renderer colours it gold): a pill with the letters cut out of it, so
-/// they show whatever is behind the text. `x, y` is the top-left of the glyph cell, `width` what `badge_width` gave.
-pub fn draw_badge(ctx: &web_sys::CanvasRenderingContext2d, x: f64, y: f64, width: f64, size_px: f64) {
-    let (left, top) = (x + 1.0, y + 1.0);
-    let (w, h) = (width - 3.0, (size_px - 2.0).max(8.0));
-    let r = (h / 3.0).floor().max(2.0);
-    ctx.set_fill_style_str("rgb(255,255,255)");
-    ctx.begin_path();
-    ctx.move_to(left + r, top);
-    ctx.line_to(left + w - r, top);
-    ctx.line_to(left + w, top + r);
-    ctx.line_to(left + w, top + h - r);
-    ctx.line_to(left + w - r, top + h);
-    ctx.line_to(left + r, top + h);
-    ctx.line_to(left, top + h - r);
-    ctx.line_to(left, top + r);
-    ctx.close_path();
-    ctx.fill();
-    ctx.set_font(&badge_font(size_px));
-    ctx.set_text_baseline("middle");
-    ctx.set_text_align("center");
-    ctx.set_fill_style_str("rgb(0,0,0)");
-    let _ = ctx.fill_text("\u{2605} VIP", left + w / 2.0, top + h / 2.0 + 0.5);
-    ctx.set_text_baseline("top");
-    ctx.set_text_align("start");
-}
-
-/// After a line of a field was given its colour: the badge star in that range is made gold, so it reads as a badge and not as a letter of
-/// the line. `byte_start..byte_end` is the range just coloured.
-pub fn gold_stars(field: &mut FieldMember, byte_start: u32, byte_end: u32) {
+/// After a line of a field was given its colour: the time in front is dimmed, so the words stand out from it, and a badge character that no
+/// picture will cover is coloured as the badge. `byte_start..byte_end` is the range just coloured.
+pub fn style_chat_line(field: &mut FieldMember, byte_start: u32, byte_end: u32) {
     let end = (byte_end as usize).min(field.text.len());
     let start = (byte_start as usize).min(end);
-    // The time at the start of a chat line is dimmed, so the words stand out from it (see `time_len`).
     if let Some(len) = time_len(&field.text[start..end]) {
         field.apply_color_to_byte_range(start as u32, (start + len) as u32, DIM);
     }
-    let stars: Vec<usize> = field.text[start..end].match_indices(STAR).map(|(at, _)| start + at).collect();
-    for at in stars {
-        field.apply_color_to_byte_range(at as u32, (at + STAR.len()) as u32, GOLD);
+    for badge in Badge::ALL {
+        let ch = badge.ch();
+        let at: Vec<usize> = field.text[start..end].match_indices(ch).map(|(at, _)| start + at).collect();
+        for pos in at {
+            field.apply_color_to_byte_range(pos as u32, (pos + ch.len_utf8()) as u32, badge.fallback());
+        }
     }
 }
 
-/// The line with the server's tag replaced by the star, or `None` when the line carries no tag in either of the server's places.
+/// The line with the server's tag replaced by the badge's character, or `None` when the line carries no tag in either of the server's places.
 pub fn swap_tag(line: &str) -> Option<String> {
     // The movie colour prefix: `<number>` then `<`.
     let (prefix, rest) = line.split_once('<')?;
@@ -101,19 +210,24 @@ pub fn swap_tag(line: &str) -> Option<String> {
     }
     // Map chat: `[time] [VIP] name says "..."`.
     if let Some(after_time) = rest.strip_prefix('[').and_then(|r| r.split_once("] ")).map(|(_, tail)| tail) {
-        if let Some(tail) = after_time.strip_prefix(TAG) {
-            if tail.starts_with(' ') {
-                let time_len = rest.len() - after_time.len();
-                return Some(format!("{prefix}<{}{STAR}{tail}", &rest[..time_len]));
+        for badge in Badge::ALL {
+            if let Some(tail) = after_time.strip_prefix(badge.tag()) {
+                if tail.starts_with(' ') {
+                    let time_len = rest.len() - after_time.len();
+                    return Some(format!("{prefix}<{}{}{tail}", &rest[..time_len], badge.ch()));
+                }
             }
         }
         return None;
     }
     // A broadcast: `name [VIP] Broadcasts: "..."`.
     let (name, tail) = rest.split_once(' ')?;
-    let tail = tail.strip_prefix(TAG)?.strip_prefix(' ')?;
-    if tail.starts_with("Broadcasts:") && !name.is_empty() {
-        return Some(format!("{prefix}<{name} {STAR} {tail}"));
+    for badge in Badge::ALL {
+        if let Some(tail) = tail.strip_prefix(badge.tag()).and_then(|t| t.strip_prefix(' ')) {
+            if tail.starts_with("Broadcasts:") && !name.is_empty() {
+                return Some(format!("{prefix}<{name} {} {tail}", badge.ch()));
+            }
+        }
     }
     None
 }
@@ -134,7 +248,7 @@ mod tests {
         field.text = "[12:00:00] \u{2605} Ann says \"hi\"".to_string();
         let len = field.text.len() as u32;
         field.apply_color_to_byte_range(0, len, (211, 143, 211));
-        gold_stars(&mut field, 0, len);
+        style_chat_line(&mut field, 0, len);
         let widen = |c: u8| ((c as u16) << 8) | c as u16;
         let line = (widen(211), widen(143), widen(211));
         let gold = (widen(0xF5), widen(0xC5), widen(0x42));
@@ -158,7 +272,7 @@ mod tests {
         field.text = "[18:39] \u{2605} Ann says \"hi\"".to_string();
         let len = field.text.len() as u32;
         field.apply_color_to_byte_range(0, len, (211, 143, 211));
-        gold_stars(&mut field, 0, len);
+        style_chat_line(&mut field, 0, len);
         let widen = |c: u8| ((c as u16) << 8) | c as u16;
         let runs = run_colours(&mut field);
         assert_eq!(runs.iter().find(|(at, _)| *at == 0).unwrap().1, (widen(DIM.0), widen(DIM.1), widen(DIM.2)), "the time is dim");
@@ -172,7 +286,7 @@ mod tests {
         field.text = "[12:00:00] Rival says hi\r[12:00:01] \u{2605} Tester says hi".to_string();
         let first_line = field.text.find('\r').unwrap() as u32;
         field.apply_color_to_byte_range(0, first_line, (255, 255, 255));
-        gold_stars(&mut field, 0, first_line);
+        style_chat_line(&mut field, 0, first_line);
         let runs = run_colours(&mut field);
         let gold = ((0xF5u16 << 8) | 0xF5, (0xC5u16 << 8) | 0xC5, (0x42u16 << 8) | 0x42);
         assert!(runs.iter().all(|(_, c)| *c != gold), "no star in that line: nothing is gold");
@@ -206,5 +320,43 @@ mod tests {
     fn lines_without_a_tag_are_left_alone() {
         assert_eq!(swap_tag("255<[12:00:00] Ann says \"hi\""), None);
         assert_eq!(swap_tag("255<Ann Broadcasts: \"hi\""), None);
+    }
+
+    #[test]
+    fn mod_and_admin_tags_become_their_own_characters() {
+        assert_eq!(swap_tag("255<[12:00] [MOD] Ann says \"hi\"").as_deref(), Some("255<[12:00] \u{25C6} Ann says \"hi\""));
+        assert_eq!(swap_tag("255<[12:00] [ADMIN] Ann says \"hi\"").as_deref(), Some("255<[12:00] \u{25B2} Ann says \"hi\""));
+        assert_eq!(swap_tag("255<Ann [MOD] Broadcasts: \"hi\"").as_deref(), Some("255<Ann \u{25C6} Broadcasts: \"hi\""));
+        assert_eq!(swap_tag("255<Ann [ADMIN] Broadcasts: \"hi\"").as_deref(), Some("255<Ann \u{25B2} Broadcasts: \"hi\""));
+        assert_eq!(swap_tag("255<[12:00] Ann says \"[ADMIN] hi\""), None, "typed by a player: left alone");
+        assert_eq!(swap_tag("255<[12:00] [GM] Ann says \"hi\""), None, "only the tags the server writes");
+    }
+
+    #[test]
+    fn a_word_is_a_badge_only_when_it_is_exactly_the_badge_character() {
+        assert_eq!(badge_of("\u{2605}"), Some(Badge::Vip));
+        assert_eq!(badge_of("\u{25C6}"), Some(Badge::Mod));
+        assert_eq!(badge_of("\u{25B2}"), Some(Badge::Admin));
+        assert_eq!(badge_of("\u{2605}x"), None);
+        assert_eq!(badge_of(""), None);
+        assert_eq!(badge_of("*"), None);
+        assert_eq!(for_measuring("a \u{2605} b \u{25B2}"), "a WWW b WWW");
+    }
+
+    #[test]
+    fn a_badge_picture_is_averaged_down_and_laid_over_the_bitmap() {
+        // A 2x picture of 2x2 output pixels: the top-left output pixel is solid red, the top-right half red (two of its four), the rest clear.
+        let mut pixels = vec![0u8; 4 * 4 * 4];
+        let mut set = |x: usize, y: usize, rgba: [u8; 4]| pixels[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4].copy_from_slice(&rgba);
+        for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1), (2, 0), (2, 1)] {
+            set(x, y, [200, 0, 0, 255]);
+        }
+        let mut bitmap = vec![7u8; 4 * 3 * 4];
+        composite(&mut bitmap, 4, 3, 1, 1, &pixels, 4, 4);
+        let at = |x: usize, y: usize| &bitmap[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4];
+        assert_eq!(at(1, 1), &[200, 0, 0, 255], "solid");
+        assert_eq!(at(2, 1), &[200, 0, 0, 127], "half covered: half alpha, the colour kept");
+        assert_eq!(at(1, 2), &[7, 7, 7, 7], "nothing drawn: the bitmap is left as it was");
+        assert_eq!(at(0, 0), &[7, 7, 7, 7], "outside the picture");
     }
 }

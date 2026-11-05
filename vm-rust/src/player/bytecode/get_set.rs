@@ -408,8 +408,8 @@ impl GetSetBytecodeHandler {
                                             let byte_start = text.char_indices().nth(char_start).map(|(b, _)| b).unwrap_or_else(|| text.len()) as u32;
                                             let byte_end = text.char_indices().nth(char_end).map(|(b, _)| b).unwrap_or_else(|| text.len()) as u32;
                                             field.apply_color_to_byte_range(byte_start, byte_end, rgb);
-                                            // The VIP badge star in a chat line is gold, whatever the line's colour (see xtra::multiuser::vip_badge).
-                                            crate::player::xtra::multiuser::vip_badge::gold_stars(field, byte_start, byte_end);
+                                            // The time of a chat line is dimmed and a badge character coloured (see xtra::multiuser::vip_badge).
+                                            crate::player::xtra::multiuser::vip_badge::style_chat_line(field, byte_start, byte_end);
                                             true
                                         } else {
                                             false
