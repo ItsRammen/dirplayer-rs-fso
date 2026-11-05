@@ -528,6 +528,8 @@ impl FontMemberHandlers {
         let Some(ctx) = native_text_measurement_context() else {
             return (100, font_size.max(12));
         };
+        // The VIP badge is drawn as a picture a little wider than a few letters: measure it as such.
+        let text = &text.replace(crate::player::xtra::multiuser::vip_badge::BADGE_CHAR, "WWW");
 
         let mut parts: Vec<String> = Vec::new();
         if let Some(s) = font_style {
@@ -841,10 +843,15 @@ impl FontMemberHandlers {
                 }
                 let is_whitespace = is_ws.unwrap_or(false);
                 ctx.set_font(&style.font);
-                let token_width = ctx
-                    .measure_text(token_text)
-                    .map(|m| m.width())
-                    .unwrap_or_else(|_| token_text.chars().count() as f64 * (style.size_px * 0.55));
+                let token_width = if crate::player::xtra::multiuser::vip_badge::is_badge(token_text) {
+                    // The VIP badge is drawn as a small picture, not as the star glyph: it takes the picture's width.
+                    crate::player::xtra::multiuser::vip_badge::badge_width(&ctx, style.size_px)
+                } else {
+                    ctx.measure_text(token_text)
+                        .map(|m| m.width())
+                        .unwrap_or_else(|_| token_text.chars().count() as f64 * (style.size_px * 0.55))
+                };
+                ctx.set_font(&style.font);
 
                 // If the line has a tab marker, text after the tab is positioned by
                 // the tab stop (e.g. right-aligned), so it doesn't increase line width
@@ -1119,7 +1126,12 @@ impl FontMemberHandlers {
                 ctx.set_font(&segment.style.font);
                 // Always render in WHITE on the black canvas for coverage measurement
                 ctx.set_fill_style_str("rgb(255,255,255)");
-                let _ = ctx.fill_text(&segment.text, x, y);
+                let is_badge = crate::player::xtra::multiuser::vip_badge::is_badge(&segment.text);
+                if is_badge {
+                    crate::player::xtra::multiuser::vip_badge::draw_badge(&ctx, x, y, segment.width, segment.style.size_px);
+                } else {
+                    let _ = ctx.fill_text(&segment.text, x, y);
+                }
 
                 // Record this segment's color region for per-run color lookup
                 // during the downscale. These rects are matched against OUTPUT
@@ -1140,7 +1152,7 @@ impl FontMemberHandlers {
                     x + segment.width,
                     canvas_y,
                     canvas_y + segment.style.size_px,
-                    segment.style.color,
+                    if is_badge { crate::player::xtra::multiuser::vip_badge::GOLD } else { segment.style.color },
                 ));
 
                 if segment.style.underline {
