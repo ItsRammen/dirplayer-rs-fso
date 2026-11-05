@@ -2744,6 +2744,8 @@ impl TextMemberHandlers {
                     } else {
                         cast_member.color = crate::player::sprite::ColorRef::PaletteIndex(color_val as u8);
                     }
+                    // A name label may have a colour of its own from the server (ROTL's VIP names).
+                    crate::player::xtra::multiuser::name_colours::restyle(cast_member);
                     // Director's `the color of member` recolors the WHOLE text,
                     // overriding per-run/span colors. Clear the styled spans'
                     // explicit colors so the renderer falls back to the new

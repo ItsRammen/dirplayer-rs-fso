@@ -977,6 +977,8 @@ impl FieldMemberHandlers {
                     let field = cast_member.member_type.as_field_mut().unwrap();
                     field.fore_color = Some(ColorRef::PaletteIndex(v as u8));
                     field.set_all_run_colors(rgb);
+                    // A name label may have a colour of its own from the server (ROTL's VIP names).
+                    crate::player::xtra::multiuser::name_colours::restyle(cast_member);
                     Ok(())
                 },
             ),
