@@ -10,9 +10,24 @@
 //!
 //! A player that does not have this module shows the tag as it is.
 
+use crate::player::cast_member::FieldMember;
+
 pub const SUBJECT: &str = "Broadcast";
 const TAG: &str = "[VIP]";
 const STAR: &str = "\u{2605}";
+/// The badge's colour: gold, whatever the colour of the line it is in.
+const GOLD: (u8, u8, u8) = (0xF5, 0xC5, 0x42);
+
+/// After a line of a field was given its colour: the badge star in that range is made gold, so it reads as a badge and not as a letter of
+/// the line. `byte_start..byte_end` is the range just coloured.
+pub fn gold_stars(field: &mut FieldMember, byte_start: u32, byte_end: u32) {
+    let end = (byte_end as usize).min(field.text.len());
+    let start = (byte_start as usize).min(end);
+    let stars: Vec<usize> = field.text[start..end].match_indices(STAR).map(|(at, _)| start + at).collect();
+    for at in stars {
+        field.apply_color_to_byte_range(at as u32, (at + STAR.len()) as u32, GOLD);
+    }
+}
 
 /// The line with the server's tag replaced by the star, or `None` when the line carries no tag in either of the server's places.
 pub fn swap_tag(line: &str) -> Option<String> {
@@ -43,6 +58,43 @@ pub fn swap_tag(line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_colours(field: &mut FieldMember) -> Vec<(u32, (u16, u16, u16))> {
+        field.sync_runs();
+        field.formatting_runs.iter().map(|r| (r.start_position, (r.color_r, r.color_g, r.color_b))).collect()
+    }
+
+    #[test]
+    fn the_star_is_gold_and_the_rest_of_the_line_keeps_its_colour() {
+        crate::player::symbols::symbol_table::init_symbol_table();
+        let mut field = FieldMember::new();
+        field.text = "[12:00:00] \u{2605} Ann says \"hi\"".to_string();
+        let len = field.text.len() as u32;
+        field.apply_color_to_byte_range(0, len, (211, 143, 211));
+        gold_stars(&mut field, 0, len);
+        let widen = |c: u8| ((c as u16) << 8) | c as u16;
+        let line = (widen(211), widen(143), widen(211));
+        let gold = (widen(0xF5), widen(0xC5), widen(0x42));
+        let star_at = field.text.find('\u{2605}').unwrap() as u32;
+        let runs = run_colours(&mut field);
+        assert_eq!(runs.iter().find(|(at, _)| *at == 0).unwrap().1, line, "the time keeps the line's colour");
+        assert_eq!(runs.iter().find(|(at, _)| *at == star_at).unwrap().1, gold, "the star is gold");
+        assert_eq!(runs.iter().find(|(at, _)| *at == star_at + 3).unwrap().1, line, "the name after it keeps the line's colour");
+    }
+
+    #[test]
+    fn a_line_without_a_star_is_left_alone_and_only_the_given_range_is_looked_at() {
+        crate::player::symbols::symbol_table::init_symbol_table();
+        let mut field = FieldMember::new();
+        field.text = "[12:00:00] Rival says hi\r[12:00:01] \u{2605} Tester says hi".to_string();
+        let first_line = field.text.find('\r').unwrap() as u32;
+        field.apply_color_to_byte_range(0, first_line, (255, 255, 255));
+        gold_stars(&mut field, 0, first_line);
+        let runs = run_colours(&mut field);
+        let gold = ((0xF5u16 << 8) | 0xF5, (0xC5u16 << 8) | 0xC5, (0x42u16 << 8) | 0x42);
+        assert!(runs.iter().all(|(_, c)| *c != gold), "no star in that line: nothing is gold");
+        assert!(runs.iter().all(|(at, _)| *at == 0 || *at == first_line), "nothing split inside the line");
+    }
 
     #[test]
     fn map_chat_gets_the_star_in_front_of_the_name() {
