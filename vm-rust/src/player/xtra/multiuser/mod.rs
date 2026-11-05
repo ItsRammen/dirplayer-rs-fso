@@ -3,6 +3,7 @@ pub mod writer;
 pub mod reader;
 pub mod types;
 pub mod name_colours;
+pub mod vip_badge;
 #[cfg(feature = "rotl-secure-login")]
 pub mod secure_login;
 
@@ -149,6 +150,15 @@ impl MultiuserXtraInstance {
                 name_colours::replace(list);
             }
             return;
+        }
+        // The server's `[VIP]` tag in a chat line becomes a star (see `vip_badge`).
+        let mut message = message;
+        if message.subject == vip_badge::SUBJECT {
+            if let StaticDatum::String(line) = &message.content {
+                if let Some(swapped) = vip_badge::swap_tag(line) {
+                    message.content = StaticDatum::String(swapped);
+                }
+            }
         }
         #[cfg(feature = "rotl-secure-login")]
         let message = {
