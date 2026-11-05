@@ -6,6 +6,7 @@
 //! server puts the tag are touched, so a player typing `[VIP]` into their own message is not turned into a badge:
 //!
 //!   map chat       `255<[12:00] [VIP] Ann says "hi"`    ->  `255<[12:00] ★ Ann says "hi"`
+//!   a private one  `133<[12:00] > [VIP] Ann tells you "hi"` ->  `133<[12:00] > ★ Ann tells you "hi"`
 //!   a broadcast    `255<Ann [VIP] Broadcasts: "hi"`     ->  `255<Ann ★ Broadcasts: "hi"`
 //!
 //! A renderer that does not draw the picture shows the character, coloured (`style_chat_line`); a player without this module shows the tag.
@@ -268,13 +269,15 @@ pub fn swap_tag(line: &str) -> Option<String> {
     if prefix.is_empty() || !prefix.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    // Map chat: `[time] [VIP] name says "..."`.
+    // Map chat `[time] [VIP] name says "..."`, or a private message `[time] > [VIP] name tells you "..."`.
     if let Some(after_time) = rest.strip_prefix('[').and_then(|r| r.split_once("] ")).map(|(_, tail)| tail) {
+        let lead = if after_time.starts_with("> ") { 2 } else { 0 };
+        let body = &after_time[lead..];
         for badge in Badge::ALL {
-            if let Some(tail) = after_time.strip_prefix(badge.tag()) {
+            if let Some(tail) = body.strip_prefix(badge.tag()) {
                 if tail.starts_with(' ') {
-                    let time_len = rest.len() - after_time.len();
-                    return Some(format!("{prefix}<{}{}{tail}", &rest[..time_len], badge.ch()));
+                    let kept = rest.len() - body.len();
+                    return Some(format!("{prefix}<{}{}{tail}", &rest[..kept], badge.ch()));
                 }
             }
         }
@@ -447,5 +450,15 @@ mod tests {
         assert_eq!(PROFILE_BADGE.with(|b| b.get()), Some(Badge::Mod));
         take_profile_badge("uBio1", &mut plain);
         assert_eq!(PROFILE_BADGE.with(|b| b.get()), None);
+    }
+
+    #[test]
+    fn a_private_message_gets_the_badge_after_the_arrow() {
+        assert_eq!(swap_tag("133<[12:00] > [ADMIN] Admin tells you \"hi\"").as_deref(), Some("133<[12:00] > \u{25B2} Admin tells you \"hi\""));
+        assert_eq!(swap_tag("133<[12:00] > [VIP] Ann tells you \"hi\"").as_deref(), Some("133<[12:00] > \u{2605} Ann tells you \"hi\""));
+        assert_eq!(swap_tag("133<[12:00] > [MOD] Gwen (Admin) tells you \"hi\"").as_deref(), Some("133<[12:00] > \u{25C6} Gwen (Admin) tells you \"hi\""));
+        assert_eq!(swap_tag("133<[12:00] > Ann tells you \"[VIP] hi\""), None, "typed by a player");
+        assert_eq!(swap_tag("133<[12:00] * [VIP] You tell Ann \"hi\""), None, "only the arrow form");
+        assert_eq!(swap_tag("133<[12:00] > x [VIP] Ann tells you"), None, "only straight after the arrow");
     }
 }
