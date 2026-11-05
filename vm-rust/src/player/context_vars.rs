@@ -260,6 +260,8 @@ pub fn player_set_context_var(
                             }
                         };
                         field.set_text_preserving_caret(combined);
+                        // `put name into field(member("Bio-Name"), 0)`: the profile window's name gets the badge of the profile shown (ROTL).
+                        crate::player::xtra::multiuser::vip_badge::decorate_profile_name(&member.name, field);
                         Ok(())
                     }
                     CastMemberType::Text(text) => {

@@ -176,7 +176,10 @@ impl MultiuserXtraInstance {
         if self.message_queue.is_empty() {
             return None;
         }
-        Some(self.message_queue.remove(0))
+        let mut message = self.message_queue.remove(0);
+        // A profile's badge rides on its last item: taken off here, kept for the profile window's name (see `vip_badge`).
+        vip_badge::take_profile_badge(&message.subject, &mut message.content);
+        Some(message)
     }
 
     pub fn receive_binary_data(&mut self, data: &[u8]) {

@@ -10,6 +10,8 @@
 //!
 //! A renderer that does not draw the picture shows the character, coloured (`style_chat_line`); a player without this module shows the tag.
 
+use std::cell::Cell;
+
 use crate::player::cast_member::FieldMember;
 
 pub const SUBJECT: &str = "Broadcast";
@@ -69,6 +71,64 @@ impl Badge {
             Badge::Mod => (0x6D, 0xB3, 0xEE),
             Badge::Admin => (0xE8, 0x64, 0x5B),
         }
+    }
+}
+
+impl Badge {
+    /// The name the server uses for it in a profile (`%VIPBADGE:vip`).
+    fn from_kind(kind: &str) -> Option<Badge> {
+        match kind.trim() {
+            "vip" => Some(Badge::Vip),
+            "mod" => Some(Badge::Mod),
+            "admin" => Some(Badge::Admin),
+            _ => None,
+        }
+    }
+}
+
+thread_local! {
+    /// The badge of the profile the movie is about to show: set when its `uBio1` message is taken from the queue, used when the movie writes
+    /// the name into the profile window's header field.
+    static PROFILE_BADGE: Cell<Option<Badge>> = const { Cell::new(None) };
+}
+
+pub const PROFILE_SUBJECT: &str = "uBio1";
+const PROFILE_MARK: &str = "%VIPBADGE:";
+/// The profile window's header field (the character's name; the movie keeps the real name in a variable of its own and never reads this back).
+const PROFILE_NAME_FIELD: &str = "Bio-Name";
+
+/// Called as a message leaves the queue for the movie. A `uBio1` profile carries its badge as a last item (`...%VIPBADGE:vip`, after the ones the
+/// movie reads): it is taken off, so the movie sees the profile as it always was, and remembered for the name field. Any other profile message
+/// (a profile without a badge, or an NPC's) forgets it.
+pub fn take_profile_badge(subject: &str, content: &mut crate::director::static_datum::StaticDatum) {
+    use crate::director::static_datum::StaticDatum;
+    if subject != PROFILE_SUBJECT && subject != "NPCBio" {
+        return;
+    }
+    let mut found = None;
+    if subject == PROFILE_SUBJECT {
+        if let StaticDatum::String(text) = content {
+            if let Some((rest, kind)) = text.rsplit_once(PROFILE_MARK) {
+                if let Some(badge) = Badge::from_kind(kind) {
+                    found = Some(badge);
+                    *text = rest.to_string();
+                }
+            }
+        }
+    }
+    PROFILE_BADGE.with(|b| b.set(found));
+}
+
+/// After the movie wrote a field's text: the profile window's name gets its badge character in front (a word of its own, so the renderer draws the
+/// picture), if the profile being shown has one.
+pub fn decorate_profile_name(member_name: &str, field: &mut FieldMember) {
+    if !member_name.eq_ignore_ascii_case(PROFILE_NAME_FIELD) {
+        return;
+    }
+    let Some(badge) = PROFILE_BADGE.with(|b| b.get()) else { return };
+    if !field.text.is_empty() && !field.text.starts_with(badge.ch()) {
+        let text = format!("{} {}", badge.ch(), field.text);
+        field.set_text_preserving_caret(text);
     }
 }
 
@@ -358,5 +418,34 @@ mod tests {
         assert_eq!(at(2, 1), &[200, 0, 0, 127], "half covered: half alpha, the colour kept");
         assert_eq!(at(1, 2), &[7, 7, 7, 7], "nothing drawn: the bitmap is left as it was");
         assert_eq!(at(0, 0), &[7, 7, 7, 7], "outside the picture");
+    }
+
+    #[test]
+    fn a_profile_loses_its_badge_item_before_the_movie_sees_it_and_the_name_field_gets_the_character() {
+        use crate::director::static_datum::StaticDatum;
+        crate::player::symbols::symbol_table::init_symbol_table();
+        let mut content = StaticDatum::String("Tester:1|inv|1|bio|NONE|%0:0|%|%%0%0:0:0%x%1-0:0:0:%Head1%VIPBADGE:mod".to_string());
+        take_profile_badge("uBio1", &mut content);
+        match &content {
+            StaticDatum::String(t) => assert_eq!(t, "Tester:1|inv|1|bio|NONE|%0:0|%|%%0%0:0:0%x%1-0:0:0:%Head1", "the movie sees what it always saw"),
+            _ => panic!("still a string"),
+        }
+        assert_eq!(PROFILE_BADGE.with(|b| b.get()), Some(Badge::Mod));
+        let mut field = FieldMember::new();
+        field.text = "Tester".to_string();
+        decorate_profile_name("Bio-Name", &mut field);
+        assert_eq!(field.text, "\u{25C6} Tester");
+        decorate_profile_name("Bio-Name", &mut field);
+        assert_eq!(field.text, "\u{25C6} Tester", "not twice");
+        let mut other = FieldMember::new();
+        other.text = "1 Year Old".to_string();
+        decorate_profile_name("Bio-Age", &mut other);
+        assert_eq!(other.text, "1 Year Old", "only the name field");
+        // A profile without a badge, or an NPC's, forgets it; other messages leave it alone.
+        let mut plain = StaticDatum::String("Rival:1|x".to_string());
+        take_profile_badge("Broadcast", &mut plain);
+        assert_eq!(PROFILE_BADGE.with(|b| b.get()), Some(Badge::Mod));
+        take_profile_badge("uBio1", &mut plain);
+        assert_eq!(PROFILE_BADGE.with(|b| b.get()), None);
     }
 }
