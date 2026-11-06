@@ -31,6 +31,11 @@ const SUBJECTS: &[&str] = &[
     "GuildState",
     // The Modern UI's guild invitation popup: who invited, how long it lasts and the guild as JSON, sent to the invitee along with the classic chat line. The movie never sees it.
     "GuildInviteOffer",
+    // The Modern UI's profile window: a character's profile (`uBio1`, with the kills that follow it as `MonsterKills` and `MonsterKillsTOTAL`), however it was asked for
+    // (right-click on a player, a friend's View Profile, a guild member). In Original mode the page answers false and the movie shows its own profile as before.
+    "uBio1",
+    "MonsterKills",
+    "MonsterKillsTOTAL",
 ];
 
 /// True when the page took the message and the movie should not see it.
@@ -70,6 +75,7 @@ mod tests {
         assert!(SUBJECTS.contains(&"FoeList") && !offer("FoeList", "[]"));
         assert!(SUBJECTS.contains(&"GuildState") && !offer("GuildState", "NONE"));
         assert!(SUBJECTS.contains(&"GuildInviteOffer") && !offer("GuildInviteOffer", "{}"));
+        assert!(SUBJECTS.contains(&"uBio1") && !offer("uBio1", "Ann:20:Body1-Head1") && SUBJECTS.contains(&"MonsterKills") && SUBJECTS.contains(&"MonsterKillsTOTAL") && !SUBJECTS.contains(&"NPCBio"));
     }
 }
 
