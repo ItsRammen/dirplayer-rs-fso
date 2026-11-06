@@ -58,3 +58,39 @@ mod tests {
         assert!(SUBJECTS.contains(&"Hirelings") && !SUBJECTS.contains(&"chatMsg") && !SUBJECTS.contains(&"MailUpdate"));
     }
 }
+
+/// The last `count` lines of a field member with each line's colour: `(text, Some((r, g, b)))`, or `None` for a line in the field's own colour. The page's
+/// chat reads the movie's own chat and combat log this way, so lines the movie writes itself ("You cast ...") are there too, with the colour the movie gave
+/// them (a line's colour is the run its first character is in; see `FieldMember::apply_color_to_byte_range`).
+pub fn field_lines(name: &str, count: usize) -> Option<Vec<(String, Option<(u8, u8, u8)>)>> {
+    use crate::player::cast_member::CastMemberType;
+    crate::player::reserve_player_ref(|player| {
+        let member_ref = player.movie.cast_manager.find_member_ref_by_name(name)?;
+        let member = player.movie.cast_manager.find_member_by_ref(&member_ref)?;
+        let CastMemberType::Field(field) = &member.member_type else { return None };
+        let runs = field.current_runs();
+        let mut lines = Vec::new();
+        let mut start = 0usize;
+        for piece in field.text.split(|c| c == '\r' || c == '\n').map(str::to_owned).collect::<Vec<_>>() {
+            let at = start;
+            start += piece.len() + 1;
+            if piece.trim().is_empty() {
+                continue;
+            }
+            let run = runs.iter().rev().find(|r| (r.start_position as usize) <= at);
+            let colour = run.and_then(|r| {
+                let (cr, cg, cb) = (r.color_r, r.color_g, r.color_b);
+                if cr == 0 && cg == 0 && cb == 0 {
+                    None // "inherit"
+                } else if cr == 0 && cg == 0 && cb == 0x0100 {
+                    Some((0, 0, 0)) // explicit black (see `apply_color_to_byte_range`)
+                } else {
+                    Some(((cr >> 8) as u8, (cg >> 8) as u8, (cb >> 8) as u8))
+                }
+            });
+            lines.push((piece, colour));
+        }
+        let skip = lines.len().saturating_sub(count);
+        Some(lines.split_off(skip))
+    })
+}

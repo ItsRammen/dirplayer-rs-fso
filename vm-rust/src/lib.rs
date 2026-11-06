@@ -474,6 +474,21 @@ fn movie_has_groove3gm(player: &crate::player::DirPlayer) -> bool {
     })
 }
 
+/// ROTL Modern UI: the last `count` lines of the field member `name` (the movie's chat or combat log) as `[[text, "#rrggbb" or ""], ...]`, or null.
+#[wasm_bindgen]
+pub fn rotl_field_lines(name: &str, count: u32) -> JsValue {
+    let Some(lines) = player::xtra::multiuser::page_bridge::field_lines(name, count as usize) else { return JsValue::NULL };
+    let out = js_sys::Array::new();
+    for (text, colour) in lines {
+        let hex = colour.map(|(r, g, b)| format!("#{:02x}{:02x}{:02x}", r, g, b)).unwrap_or_default();
+        let pair = js_sys::Array::new();
+        pair.push(&JsValue::from_str(&text));
+        pair.push(&JsValue::from_str(&hex));
+        out.push(&pair);
+    }
+    out.into()
+}
+
 /// ROTL inventory overlay (prototype): the picture of an item, `{width, height, hasAlpha, data}` (RGBA bytes), or null when the movie has no
 /// bitmap of that name.
 #[wasm_bindgen]
