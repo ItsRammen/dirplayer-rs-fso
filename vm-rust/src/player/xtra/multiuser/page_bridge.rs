@@ -26,6 +26,9 @@ const SUBJECTS: &[&str] = &[
     "FriendsAll",
     // The Modern UI's battle dock: the battle's enemies as JSON, sent by the server after every change (the movie only learns an enemy by a mouse-over). The movie never sees it.
     "FoeList",
+    // The Modern UI's Guild window: the whole guild (name, crest, message, members with rank and who is online, stats) as JSON, or `NONE`, sent by the server at login and
+    // whenever the roster, the crest or who is online changes. The movie never sees it.
+    "GuildState",
 ];
 
 /// True when the page took the message and the movie should not see it.
@@ -63,6 +66,7 @@ mod tests {
         assert!(SUBJECTS.contains(&"Hirelings") && !SUBJECTS.contains(&"chatMsg") && !SUBJECTS.contains(&"MailUpdate"));
         assert!(SUBJECTS.contains(&"FriendsAll") && !offer("FriendsAll", "Ann:1"));
         assert!(SUBJECTS.contains(&"FoeList") && !offer("FoeList", "[]"));
+        assert!(SUBJECTS.contains(&"GuildState") && !offer("GuildState", "NONE"));
     }
 }
 
