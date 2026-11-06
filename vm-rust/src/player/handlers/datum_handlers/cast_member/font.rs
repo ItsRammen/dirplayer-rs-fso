@@ -528,6 +528,8 @@ impl FontMemberHandlers {
         let Some(ctx) = native_text_measurement_context() else {
             return (100, font_size.max(12));
         };
+        // The VIP badge is drawn as a picture a little wider than a few letters: measure it as such.
+        let text = &crate::player::xtra::multiuser::vip_badge::for_measuring(text);
 
         let mut parts: Vec<String> = Vec::new();
         if let Some(s) = font_style {
@@ -841,10 +843,15 @@ impl FontMemberHandlers {
                 }
                 let is_whitespace = is_ws.unwrap_or(false);
                 ctx.set_font(&style.font);
-                let token_width = ctx
-                    .measure_text(token_text)
-                    .map(|m| m.width())
-                    .unwrap_or_else(|_| token_text.chars().count() as f64 * (style.size_px * 0.55));
+                let token_width = if let Some(badge) = crate::player::xtra::multiuser::vip_badge::badge_of(token_text) {
+                    // A chat badge is drawn as a small picture, not as its character: it takes the picture's width.
+                    crate::player::xtra::multiuser::vip_badge::badge_width(&ctx, style.size_px, badge)
+                } else {
+                    ctx.measure_text(token_text)
+                        .map(|m| m.width())
+                        .unwrap_or_else(|_| token_text.chars().count() as f64 * (style.size_px * 0.55))
+                };
+                ctx.set_font(&style.font);
 
                 // If the line has a tab marker, text after the tab is positioned by
                 // the tab stop (e.g. right-aligned), so it doesn't increase line width
@@ -1010,6 +1017,8 @@ impl FontMemberHandlers {
         // underline above); only color needed this per-pixel routing because
         // the text is rendered white-on-black for coverage.
         let mut seg_color_rects: Vec<(f64, f64, f64, f64, (u8, u8, u8))> = Vec::new();
+        // Chat badges (x, canvas y, width, font size, which): drawn in full colour on the bitmap once the text is down.
+        let mut badge_draws: Vec<(f64, f64, f64, f64, crate::player::xtra::multiuser::vip_badge::Badge)> = Vec::new();
 
         let mut y = top_spacing.max(0) as f64;
         let mut prev_par_idx: Option<u16> = None;
@@ -1119,7 +1128,13 @@ impl FontMemberHandlers {
                 ctx.set_font(&segment.style.font);
                 // Always render in WHITE on the black canvas for coverage measurement
                 ctx.set_fill_style_str("rgb(255,255,255)");
-                let _ = ctx.fill_text(&segment.text, x, y);
+                let badge = crate::player::xtra::multiuser::vip_badge::badge_of(&segment.text);
+                if let Some(badge) = badge {
+                    // Drawn in full colour after the text (see `badge_draws`), not on this white-on-black coverage canvas.
+                    badge_draws.push((x, y + start_y as f64, segment.width, segment.style.size_px, badge));
+                } else {
+                    let _ = ctx.fill_text(&segment.text, x, y);
+                }
 
                 // Record this segment's color region for per-run color lookup
                 // during the downscale. These rects are matched against OUTPUT
@@ -1314,6 +1329,15 @@ impl FontMemberHandlers {
                     // Coverage maps to alpha: text body=255, anti-aliased edges=partial
                     bitmap.data[dest_idx + 3] = coverage.min(255);
                 }
+            }
+        }
+
+        for &(bx, by, bw, bsize, badge) in &badge_draws {
+            if let Some((pixels, pw, ph)) = crate::player::xtra::multiuser::vip_badge::badge_pixels(&document, badge, bw, bsize) {
+                crate::player::xtra::multiuser::vip_badge::composite(
+                    &mut bitmap.data, bitmap.width as i32, bitmap.height as i32,
+                    start_x + bx.round() as i32, by.round() as i32, &pixels, pw, ph,
+                );
             }
         }
 

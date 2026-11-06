@@ -715,6 +715,8 @@ impl FieldMemberHandlers {
                 |cast_member, value| {
                     let field = cast_member.member_type.as_field_mut().unwrap();
                     field.set_text_preserving_caret(value?.trim_end_matches('\0').to_string());
+                    // The profile window's name gets the badge of the profile being shown (ROTL; see xtra::multiuser::vip_badge).
+                    crate::player::xtra::multiuser::vip_badge::decorate_profile_name(&cast_member.name, cast_member.member_type.as_field_mut().unwrap());
                     Ok(())
                 },
             ),

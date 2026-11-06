@@ -3,6 +3,7 @@ pub mod writer;
 pub mod reader;
 pub mod types;
 pub mod name_colours;
+pub mod vip_badge;
 #[cfg(feature = "rotl-secure-login")]
 pub mod secure_login;
 
@@ -150,6 +151,15 @@ impl MultiuserXtraInstance {
             }
             return;
         }
+        // The server's `[VIP]` tag in a chat line becomes a star (see `vip_badge`).
+        let mut message = message;
+        if message.subject == vip_badge::SUBJECT {
+            if let StaticDatum::String(line) = &message.content {
+                if let Some(swapped) = vip_badge::swap_tag(line) {
+                    message.content = StaticDatum::String(swapped);
+                }
+            }
+        }
         #[cfg(feature = "rotl-secure-login")]
         let message = {
             let mut message = message;
@@ -166,7 +176,10 @@ impl MultiuserXtraInstance {
         if self.message_queue.is_empty() {
             return None;
         }
-        Some(self.message_queue.remove(0))
+        let mut message = self.message_queue.remove(0);
+        // A profile's badge rides on its last item: taken off here, kept for the profile window's name (see `vip_badge`).
+        vip_badge::take_profile_badge(&message.subject, &mut message.content);
+        Some(message)
     }
 
     pub fn receive_binary_data(&mut self, data: &[u8]) {
