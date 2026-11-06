@@ -20,3 +20,30 @@ pub fn deliver(content: &str) {
     #[cfg(not(target_arch = "wasm32"))]
     let _ = content;
 }
+
+/// An item's picture: the bitmap cast member the movie itself draws for it (the movie finds it with `member(<item name>)`, so this does too).
+pub struct Icon {
+    pub width: usize,
+    pub height: usize,
+    /// True when the bitmap carries its own alpha; otherwise the page keys out the background colour, as the movie's ink 36 does.
+    pub has_alpha: bool,
+    pub rgba: Vec<u8>,
+}
+
+pub fn icon(name: &str) -> Option<Icon> {
+    use crate::player::cast_member::CastMemberType;
+    crate::player::reserve_player_ref(|player| {
+        let member_ref = player.movie.cast_manager.find_member_ref_by_name(name)?;
+        let member = player.movie.cast_manager.find_member_by_ref(&member_ref)?;
+        let CastMemberType::Bitmap(bitmap_member) = &member.member_type else { return None };
+        let bitmap = player.bitmap_manager.get_bitmap(bitmap_member.image_ref)?;
+        let palettes = player.movie.cast_manager.palettes();
+        let rgba = crate::rendering_gpu::webgl2::WebGL2Renderer::bitmap_to_rgba(bitmap, &palettes, 0, None, None, None, (0, 0), false);
+        let (width, height) = (bitmap.width as usize, bitmap.height as usize);
+        // Only item-sized pictures: a name that happens to belong to a stage graphic is not an icon.
+        if width == 0 || height == 0 || width > 128 || height > 128 || rgba.len() != width * height * 4 {
+            return None;
+        }
+        Some(Icon { width, height, has_alpha: bitmap.original_bit_depth == 32 && bitmap.use_alpha, rgba })
+    })
+}
