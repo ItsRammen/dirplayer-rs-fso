@@ -153,11 +153,14 @@ impl MultiuserXtraInstance {
         }
         // The server's `[VIP]` tag in a chat line becomes a star (see `vip_badge`).
         let mut message = message;
-        if message.subject == vip_badge::SUBJECT {
-            if let StaticDatum::String(line) = &message.content {
-                if let Some(swapped) = vip_badge::swap_tag(line) {
-                    message.content = StaticDatum::String(swapped);
-                }
+        let swap: Option<fn(&str) -> Option<String>> = match message.subject.as_str() {
+            vip_badge::SUBJECT => Some(vip_badge::swap_tag),
+            vip_badge::GUILD_SUBJECT => Some(vip_badge::swap_guild_tag),
+            _ => None,
+        };
+        if let (Some(swap), StaticDatum::String(line)) = (swap, &message.content) {
+            if let Some(swapped) = swap(line) {
+                message.content = StaticDatum::String(swapped);
             }
         }
         #[cfg(feature = "rotl-secure-login")]
