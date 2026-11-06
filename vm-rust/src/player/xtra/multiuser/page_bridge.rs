@@ -21,6 +21,9 @@ const SUBJECTS: &[&str] = &[
     "ItemInfoReturn",
     "HereAmInv",
     "HereAmCond",
+    // The Modern UI's friends window: the server's whole friends list with who is online (`name:1|name:0`). The movie has no such message and does not
+    // see it (the page takes it); `YourFriends`, the online list, still goes to the movie as before.
+    "FriendsAll",
 ];
 
 /// True when the page took the message and the movie should not see it.
@@ -56,6 +59,7 @@ mod tests {
         assert!(!offer("Hirelings", "Ranger:Ann:1"));
         assert!(!offer("TypChatMsg", "hello"));
         assert!(SUBJECTS.contains(&"Hirelings") && !SUBJECTS.contains(&"chatMsg") && !SUBJECTS.contains(&"MailUpdate"));
+        assert!(SUBJECTS.contains(&"FriendsAll") && !offer("FriendsAll", "Ann:1"));
     }
 }
 
