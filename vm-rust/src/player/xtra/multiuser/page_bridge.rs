@@ -24,6 +24,8 @@ const SUBJECTS: &[&str] = &[
     // The Modern UI's friends window: the server's whole friends list with who is online (`name:1|name:0`). The movie has no such message and does not
     // see it (the page takes it); `YourFriends`, the online list, still goes to the movie as before.
     "FriendsAll",
+    // The Modern UI's battle dock: the battle's enemies as JSON, sent by the server after every change (the movie only learns an enemy by a mouse-over). The movie never sees it.
+    "FoeList",
 ];
 
 /// True when the page took the message and the movie should not see it.
@@ -60,6 +62,7 @@ mod tests {
         assert!(!offer("TypChatMsg", "hello"));
         assert!(SUBJECTS.contains(&"Hirelings") && !SUBJECTS.contains(&"chatMsg") && !SUBJECTS.contains(&"MailUpdate"));
         assert!(SUBJECTS.contains(&"FriendsAll") && !offer("FriendsAll", "Ann:1"));
+        assert!(SUBJECTS.contains(&"FoeList") && !offer("FoeList", "[]"));
     }
 }
 
