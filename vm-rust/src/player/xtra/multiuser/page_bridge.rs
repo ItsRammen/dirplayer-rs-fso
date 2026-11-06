@@ -29,6 +29,8 @@ const SUBJECTS: &[&str] = &[
     // The Modern UI's Guild window: the whole guild (name, crest, message, members with rank and who is online, stats) as JSON, or `NONE`, sent by the server at login and
     // whenever the roster, the crest or who is online changes. The movie never sees it.
     "GuildState",
+    // The Modern UI's guild invitation popup: who invited, how long it lasts and the guild as JSON, sent to the invitee along with the classic chat line. The movie never sees it.
+    "GuildInviteOffer",
 ];
 
 /// True when the page took the message and the movie should not see it.
@@ -67,6 +69,7 @@ mod tests {
         assert!(SUBJECTS.contains(&"FriendsAll") && !offer("FriendsAll", "Ann:1"));
         assert!(SUBJECTS.contains(&"FoeList") && !offer("FoeList", "[]"));
         assert!(SUBJECTS.contains(&"GuildState") && !offer("GuildState", "NONE"));
+        assert!(SUBJECTS.contains(&"GuildInviteOffer") && !offer("GuildInviteOffer", "{}"));
     }
 }
 
