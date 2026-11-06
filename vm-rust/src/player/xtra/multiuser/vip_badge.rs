@@ -7,7 +7,8 @@
 //!
 //!   map chat       `255<[12:00] [VIP] Ann says "hi"`    ->  `255<[12:00] ★ Ann says "hi"`
 //!   a private one  `133<[12:00] > [VIP] Ann tells you "hi"` ->  `133<[12:00] > ★ Ann tells you "hi"`
-//!   a broadcast    `255<Ann [VIP] Broadcasts: "hi"`     ->  `255<Ann ★ Broadcasts: "hi"`
+//!   a broadcast    `255<Ann [VIP] [12:00] Broadcasts: "hi"` ->  `255<Ann ★ [12:00] Broadcasts: "hi"`
+//!   guild chat     `[12:00] [VIP] Ann tells Guild "hi"` ->  `[12:00] ★ Ann tells Guild "hi"` (subject `GLDCHT`, no colour prefix)
 //!
 //! A renderer that does not draw the picture shows the character, coloured (`style_chat_line`); a player without this module shows the tag.
 
@@ -16,6 +17,8 @@ use std::cell::Cell;
 use crate::player::cast_member::FieldMember;
 
 pub const SUBJECT: &str = "Broadcast";
+/// Guild chat: the line has no colour prefix, the movie puts it in the chat field as it is.
+pub const GUILD_SUBJECT: &str = "GLDCHT";
 /// The colour of the time in front of a chat line.
 pub const DIM: (u8, u8, u8) = (0x8F, 0x8F, 0x8F);
 
@@ -245,13 +248,24 @@ pub fn time_len(line: &str) -> Option<usize> {
     ok.then_some(end + 2)
 }
 
+/// Where the time of a chat line stands in it, as (byte offset, length): at the very start, or in a broadcast after the name and badge
+/// (`Ann ★ [12:00] Broadcasts: "hi"`: the name stays the first word, so the time comes later).
+pub fn time_span(line: &str) -> Option<(usize, usize)> {
+    if let Some(len) = time_len(line) {
+        return Some((0, len));
+    }
+    let head = &line[..line.find(" Broadcasts:")?];
+    let at = head.rfind(" [")? + 1;
+    time_len(&head[at..]).filter(|len| at + len == head.len()).map(|len| (at, len))
+}
+
 /// After a line of a field was given its colour: the time in front is dimmed, so the words stand out from it, and a badge character that no
 /// picture will cover is coloured as the badge. `byte_start..byte_end` is the range just coloured.
 pub fn style_chat_line(field: &mut FieldMember, byte_start: u32, byte_end: u32) {
     let end = (byte_end as usize).min(field.text.len());
     let start = (byte_start as usize).min(end);
-    if let Some(len) = time_len(&field.text[start..end]) {
-        field.apply_color_to_byte_range(start as u32, (start + len) as u32, DIM);
+    if let Some((at, len)) = time_span(&field.text[start..end]) {
+        field.apply_color_to_byte_range((start + at) as u32, (start + at + len) as u32, DIM);
     }
     for badge in Badge::ALL {
         let ch = badge.ch();
@@ -269,7 +283,17 @@ pub fn swap_tag(line: &str) -> Option<String> {
     if prefix.is_empty() || !prefix.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    // Map chat `[time] [VIP] name says "..."`, or a private message `[time] > [VIP] name tells you "..."`.
+    swap_in(rest, true).map(|swapped| format!("{prefix}<{swapped}"))
+}
+
+/// A guild chat line, `[12:00] [VIP] Ann tells Guild "hi"`: no colour prefix, and the tag stands where map chat has it.
+pub fn swap_guild_tag(line: &str) -> Option<String> {
+    swap_in(line, false)
+}
+
+/// `rest` is a line without its colour prefix. Map chat `[time] [VIP] name says "..."`, a private message `[time] > [VIP] name tells you "..."`
+/// (and guild chat the same as map chat), or, when `broadcast` is set, `name [VIP] [time] Broadcasts: "..."`.
+fn swap_in(rest: &str, broadcast: bool) -> Option<String> {
     if let Some(after_time) = rest.strip_prefix('[').and_then(|r| r.split_once("] ")).map(|(_, tail)| tail) {
         let lead = if after_time.starts_with("> ") { 2 } else { 0 };
         let body = &after_time[lead..];
@@ -277,18 +301,22 @@ pub fn swap_tag(line: &str) -> Option<String> {
             if let Some(tail) = body.strip_prefix(badge.tag()) {
                 if tail.starts_with(' ') {
                     let kept = rest.len() - body.len();
-                    return Some(format!("{prefix}<{}{}{tail}", &rest[..kept], badge.ch()));
+                    return Some(format!("{}{}{tail}", &rest[..kept], badge.ch()));
                 }
             }
         }
         return None;
     }
-    // A broadcast: `name [VIP] Broadcasts: "..."`.
+    if !broadcast {
+        return None;
+    }
     let (name, tail) = rest.split_once(' ')?;
     for badge in Badge::ALL {
         if let Some(tail) = tail.strip_prefix(badge.tag()).and_then(|t| t.strip_prefix(' ')) {
-            if tail.starts_with("Broadcasts:") && !name.is_empty() {
-                return Some(format!("{prefix}<{name} {} {tail}", badge.ch()));
+            // The time, when there is one, sits between the badge and the word.
+            let after_time = time_len(tail).map(|len| &tail[len..]).and_then(|t| t.strip_prefix(' ')).unwrap_or(tail);
+            if after_time.starts_with("Broadcasts:") && !name.is_empty() {
+                return Some(format!("{name} {} {tail}", badge.ch()));
             }
         }
     }
@@ -365,6 +393,9 @@ mod tests {
     #[test]
     fn a_broadcast_gets_the_star_after_the_name() {
         assert_eq!(swap_tag("255<Ann [VIP] Broadcasts: \"hi\"").as_deref(), Some("255<Ann \u{2605} Broadcasts: \"hi\""));
+        assert_eq!(swap_tag("255<Ann [VIP] [12:00] Broadcasts: \"hi\"").as_deref(), Some("255<Ann \u{2605} [12:00] Broadcasts: \"hi\""), "with the time");
+        assert_eq!(swap_tag("252<Riley [ADMIN] [18:39] Broadcasts: \"x\"").as_deref(), Some("252<Riley \u{25B2} [18:39] Broadcasts: \"x\""));
+        assert_eq!(swap_tag("255<Ann [VIP] [12:00] shouts: \"hi\""), None);
     }
 
     #[test]
@@ -460,5 +491,24 @@ mod tests {
         assert_eq!(swap_tag("133<[12:00] > Ann tells you \"[VIP] hi\""), None, "typed by a player");
         assert_eq!(swap_tag("133<[12:00] * [VIP] You tell Ann \"hi\""), None, "only the arrow form");
         assert_eq!(swap_tag("133<[12:00] > x [VIP] Ann tells you"), None, "only straight after the arrow");
+    }
+
+    #[test]
+    fn guild_chat_gets_the_badge_after_the_time() {
+        assert_eq!(swap_guild_tag("[12:00] [VIP] Ann tells Heroes \"hi\"").as_deref(), Some("[12:00] \u{2605} Ann tells Heroes \"hi\""));
+        assert_eq!(swap_guild_tag("[12:00] [MOD] Ann tells Heroes \"hi\"").as_deref(), Some("[12:00] \u{25C6} Ann tells Heroes \"hi\""));
+        assert_eq!(swap_guild_tag("[12:00] [ADMIN] Ann tells Heroes \"[VIP] x\"").as_deref(), Some("[12:00] \u{25B2} Ann tells Heroes \"[VIP] x\""));
+        assert_eq!(swap_guild_tag("[12:00] Ann tells Heroes \"[VIP] hi\""), None, "typed by a player");
+        assert_eq!(swap_guild_tag("Ann [VIP] [12:00] Broadcasts: \"hi\""), None, "a broadcast form is not a guild line");
+        assert_eq!(swap_guild_tag("[12:00] *** Ann has left Heroes."), None);
+    }
+
+    #[test]
+    fn the_time_is_found_at_the_start_or_after_the_name_in_a_broadcast() {
+        assert_eq!(time_span("[12:00] \u{2605} Ann says \"hi\""), Some((0, 7)));
+        assert_eq!(time_span("Ann \u{2605} [12:00] Broadcasts: \"hi\""), Some(("Ann \u{2605} ".len(), 7)));
+        assert_eq!(time_span("Ann [12:00] Broadcasts: \"hi\""), Some((4, 7)));
+        assert_eq!(time_span("Ann Broadcasts: \"at [12:00] sharp\""), None, "inside the words");
+        assert_eq!(time_span("Ann says \"hi\""), None);
     }
 }
