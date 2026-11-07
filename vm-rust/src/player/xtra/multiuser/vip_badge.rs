@@ -248,6 +248,44 @@ pub fn time_len(line: &str) -> Option<usize> {
     ok.then_some(end + 2)
 }
 
+/// A broadcast line as the movie wrote it, `Ann \u{2605} [12:00] Broadcasts: "hi"`, in the order every other chat line has: `[12:00] \u{2605} Ann Broadcasts: "hi"`.
+/// The movie reads the first word of a broadcast as the sender for its ignore list, so the server keeps the name first and the player turns the
+/// line round once it is in the field. Both orders are the same length (the same pieces, moved), so colours already set stay where they are.
+pub fn broadcast_display_order(line: &str) -> Option<String> {
+    let (name, tail) = line.split_once(' ')?;
+    if name.is_empty() || name.starts_with('[') {
+        return None;
+    }
+    let badge = Badge::ALL.iter().find(|b| tail.strip_prefix(b.ch()).map_or(false, |t| t.starts_with(' ')));
+    let tail = match badge {
+        Some(b) => &tail[b.ch().len_utf8() + 1..],
+        None => tail,
+    };
+    let len = time_len(tail)?;
+    let (time, after) = tail.split_at(len);
+    if !after.starts_with(" Broadcasts:") {
+        return None;
+    }
+    Some(match badge {
+        Some(b) => format!("{time} {} {name}{after}", b.ch()),
+        None => format!("{time} {name}{after}"),
+    })
+}
+
+/// After a line of a field is about to be coloured: if it is a broadcast, turn it into the display order (see `broadcast_display_order`).
+pub fn arrange_broadcast_line(field: &mut FieldMember, byte_start: u32, byte_end: u32) {
+    let end = (byte_end as usize).min(field.text.len());
+    let start = (byte_start as usize).min(end);
+    let Some(new_line) = field.text.get(start..end).and_then(broadcast_display_order) else { return };
+    if new_line.len() != end - start {
+        return;
+    }
+    // The runs are aligned to the old text first; the new text is the same length, so they stay valid for it.
+    field.sync_runs();
+    field.text.replace_range(start..end, &new_line);
+    field.runs_text = field.text.clone();
+}
+
 /// Where the time of a chat line stands in it, as (byte offset, length): at the very start, or in a broadcast after the name and badge
 /// (`Ann ★ [12:00] Broadcasts: "hi"`: the name stays the first word, so the time comes later).
 pub fn time_span(line: &str) -> Option<(usize, usize)> {
@@ -510,5 +548,32 @@ mod tests {
         assert_eq!(time_span("Ann [12:00] Broadcasts: \"hi\""), Some((4, 7)));
         assert_eq!(time_span("Ann Broadcasts: \"at [12:00] sharp\""), None, "inside the words");
         assert_eq!(time_span("Ann says \"hi\""), None);
+    }
+
+    #[test]
+    fn a_broadcast_is_turned_into_the_display_order_in_the_same_length() {
+        let a = "Ann \u{2605} [12:00] Broadcasts: \"hi\"";
+        assert_eq!(broadcast_display_order(a).as_deref(), Some("[12:00] \u{2605} Ann Broadcasts: \"hi\""));
+        assert_eq!(broadcast_display_order(a).unwrap().len(), a.len());
+        assert_eq!(broadcast_display_order("Bob [12:00] Broadcasts: \"x\"").as_deref(), Some("[12:00] Bob Broadcasts: \"x\""));
+        assert_eq!(broadcast_display_order("Riley \u{25B2} [18:39:04] Broadcasts: \"x\"").as_deref(), Some("[18:39:04] \u{25B2} Riley Broadcasts: \"x\""));
+        assert_eq!(broadcast_display_order("[12:00] \u{2605} Ann Broadcasts: \"hi\""), None, "already in order");
+        assert_eq!(broadcast_display_order("Ann Broadcasts: \"hi\""), None, "no time: an older server");
+        assert_eq!(broadcast_display_order("Ann says \"[12:00] Broadcasts: x\""), None);
+        assert_eq!(broadcast_display_order("[12:00] Ann says \"hi\""), None);
+    }
+
+    #[test]
+    fn arranging_a_broadcast_in_a_field_keeps_the_colours_where_they_were() {
+        crate::player::symbols::symbol_table::init_symbol_table();
+        let mut field = FieldMember::new();
+        field.text = "old\rAnn \u{2605} [12:00] Broadcasts: \"hi\"".to_string();
+        field.apply_color_to_byte_range(4, field.text.len() as u32, (255, 0, 0));
+        let (start, end) = (4u32, field.text.len() as u32);
+        arrange_broadcast_line(&mut field, start, end);
+        assert_eq!(field.text, "old\r[12:00] \u{2605} Ann Broadcasts: \"hi\"");
+        assert_eq!(field.runs_text, field.text);
+        let runs = run_colours(&mut field);
+        assert!(runs.iter().any(|(at, c)| *at == 4 && *c == (0xFFFF, 0, 0)), "{runs:?}");
     }
 }

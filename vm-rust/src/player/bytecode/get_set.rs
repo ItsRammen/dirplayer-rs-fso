@@ -407,6 +407,8 @@ impl GetSetBytecodeHandler {
                                             let (char_start, char_end) = StringChunkHandlers::resolve_chunk_char_range(&text, chunk_expr.as_ref().unwrap());
                                             let byte_start = text.char_indices().nth(char_start).map(|(b, _)| b).unwrap_or_else(|| text.len()) as u32;
                                             let byte_end = text.char_indices().nth(char_end).map(|(b, _)| b).unwrap_or_else(|| text.len()) as u32;
+                                            // A broadcast is turned into the order the other chat lines have, the same length (see xtra::multiuser::vip_badge).
+                                            crate::player::xtra::multiuser::vip_badge::arrange_broadcast_line(field, byte_start, byte_end);
                                             field.apply_color_to_byte_range(byte_start, byte_end, rgb);
                                             // The time of a chat line is dimmed and a badge character coloured (see xtra::multiuser::vip_badge).
                                             crate::player::xtra::multiuser::vip_badge::style_chat_line(field, byte_start, byte_end);
