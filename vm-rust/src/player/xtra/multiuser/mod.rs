@@ -5,6 +5,7 @@ pub mod types;
 pub mod name_colours;
 pub mod vip_badge;
 pub mod inv_overlay;
+pub mod page_bridge;
 #[cfg(feature = "rotl-secure-login")]
 pub mod secure_login;
 
@@ -158,6 +159,12 @@ impl MultiuserXtraInstance {
                 inv_overlay::deliver(json);
             }
             return;
+        }
+        // What the Modern UI page draws (party, currencies, date, teleport list, ...) is offered to it first (see `page_bridge`).
+        if let StaticDatum::String(content) = &message.content {
+            if page_bridge::offer(&message.subject, content) {
+                return;
+            }
         }
         // The server's `[VIP]` tag in a chat line becomes a star (see `vip_badge`).
         let mut message = message;
