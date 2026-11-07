@@ -474,6 +474,22 @@ fn movie_has_groove3gm(player: &crate::player::DirPlayer) -> bool {
     })
 }
 
+/// ROTL inventory overlay (prototype): the picture of an item, `{width, height, hasAlpha, data}` (RGBA bytes), or null when the movie has no
+/// bitmap of that name.
+#[wasm_bindgen]
+pub fn rotl_item_icon(name: &str) -> JsValue {
+    let Some(icon) = player::xtra::multiuser::inv_overlay::icon(name) else { return JsValue::NULL };
+    let object = js_sys::Object::new();
+    let set = |key: &str, value: JsValue| {
+        let _ = js_sys::Reflect::set(&object, &JsValue::from_str(key), &value);
+    };
+    set("width", JsValue::from_f64(icon.width as f64));
+    set("height", JsValue::from_f64(icon.height as f64));
+    set("hasAlpha", JsValue::from_bool(icon.has_alpha));
+    set("data", js_sys::Uint8ClampedArray::from(&icon.rgba[..]).into());
+    object.into()
+}
+
 #[wasm_bindgen]
 pub fn player_print_member_bitmap_hex(cast_lib: i32, cast_member: i32) {
     player_dispatch(PlayerVMCommand::PrintMemberBitmapHex(CastMemberRef {

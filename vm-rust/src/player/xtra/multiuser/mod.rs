@@ -4,6 +4,7 @@ pub mod reader;
 pub mod types;
 pub mod name_colours;
 pub mod vip_badge;
+pub mod inv_overlay;
 #[cfg(feature = "rotl-secure-login")]
 pub mod secure_login;
 
@@ -148,6 +149,13 @@ impl MultiuserXtraInstance {
         if message.subject == name_colours::SUBJECT {
             if let StaticDatum::String(list) = &message.content {
                 name_colours::replace(list);
+            }
+            return;
+        }
+        // The inventory pages' reply is for the web page, not the movie (see `inv_overlay`).
+        if message.subject == inv_overlay::SUBJECT {
+            if let StaticDatum::String(json) = &message.content {
+                inv_overlay::deliver(json);
             }
             return;
         }
