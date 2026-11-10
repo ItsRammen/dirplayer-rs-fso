@@ -36,6 +36,9 @@ const SUBJECTS: &[&str] = &[
     "uBio1",
     "MonsterKills",
     "MonsterKillsTOTAL",
+    // The Modern UI's battle: the game's own enemy panel that opens when the mouse rests on an enemy (the server's reply to `CkOTleTSpt`, drawn by `DrawZeHirelingBattleViewfinder`).
+    // The page shows its own card for it, so in a Modern-mode battle it answers true and the movie draws nothing; otherwise (Original mode, or out of a battle) false and the movie draws its panel.
+    "HirBatViewGoGoGo",
 ];
 
 /// True when the page took the message and the movie should not see it.
@@ -75,7 +78,7 @@ mod tests {
         assert!(SUBJECTS.contains(&"FoeList") && !offer("FoeList", "[]"));
         assert!(SUBJECTS.contains(&"GuildState") && !offer("GuildState", "NONE"));
         assert!(SUBJECTS.contains(&"GuildInviteOffer") && !offer("GuildInviteOffer", "{}"));
-        assert!(SUBJECTS.contains(&"uBio1") && !offer("uBio1", "Ann:20:Body1-Head1") && SUBJECTS.contains(&"MonsterKills") && SUBJECTS.contains(&"MonsterKillsTOTAL") && !SUBJECTS.contains(&"NPCBio"));
+        assert!(SUBJECTS.contains(&"HirBatViewGoGoGo") && !offer("HirBatViewGoGoGo", "Rat:Mozart:1")); assert!(SUBJECTS.contains(&"uBio1") && !offer("uBio1", "Ann:20:Body1-Head1") && SUBJECTS.contains(&"MonsterKills") && SUBJECTS.contains(&"MonsterKillsTOTAL") && !SUBJECTS.contains(&"NPCBio"));
     }
 }
 
