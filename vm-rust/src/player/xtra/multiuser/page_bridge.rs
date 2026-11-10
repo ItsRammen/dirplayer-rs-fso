@@ -36,6 +36,9 @@ const SUBJECTS: &[&str] = &[
     "uBio1",
     "MonsterKills",
     "MonsterKillsTOTAL",
+    // The Modern UI's battle: the game's own enemy panel that opens when the mouse rests on an enemy (the server's reply to `CkOTleTSpt`, drawn by `DrawZeHirelingBattleViewfinder`).
+    // The page shows its own card for it, so in a Modern-mode battle it answers true and the movie draws nothing; otherwise (Original mode, or out of a battle) false and the movie draws its panel.
+    "HirBatViewGoGoGo",
 ];
 
 /// True when the page took the message and the movie should not see it.
@@ -75,7 +78,101 @@ mod tests {
         assert!(SUBJECTS.contains(&"FoeList") && !offer("FoeList", "[]"));
         assert!(SUBJECTS.contains(&"GuildState") && !offer("GuildState", "NONE"));
         assert!(SUBJECTS.contains(&"GuildInviteOffer") && !offer("GuildInviteOffer", "{}"));
-        assert!(SUBJECTS.contains(&"uBio1") && !offer("uBio1", "Ann:20:Body1-Head1") && SUBJECTS.contains(&"MonsterKills") && SUBJECTS.contains(&"MonsterKillsTOTAL") && !SUBJECTS.contains(&"NPCBio"));
+        assert!(SUBJECTS.contains(&"HirBatViewGoGoGo") && !offer("HirBatViewGoGoGo", "Rat:Mozart:1")); assert!(SUBJECTS.contains(&"uBio1") && !offer("uBio1", "Ann:20:Body1-Head1") && SUBJECTS.contains(&"MonsterKills") && SUBJECTS.contains(&"MonsterKillsTOTAL") && !SUBJECTS.contains(&"NPCBio"));
+    }
+}
+
+/// The colour a formatting run gives text: `None` for "inherit", `Some((0, 0, 0))` for explicit black (see `FieldMember::apply_color_to_byte_range`), else the run's colour.
+fn run_colour(run: &crate::director::chunks::text::StxtFormattingRun) -> Option<(u8, u8, u8)> {
+    let (cr, cg, cb) = (run.color_r, run.color_g, run.color_b);
+    if cr == 0 && cg == 0 && cb == 0 {
+        None
+    } else if cr == 0 && cg == 0 && cb == 0x0100 {
+        Some((0, 0, 0))
+    } else {
+        Some(((cr >> 8) as u8, (cg >> 8) as u8, (cb >> 8) as u8))
+    }
+}
+
+/// One line of a field, cut at every place its colour changes: `piece` is the line's text, `at` its byte offset in the field, `runs` the runs' `(start byte, colour)` in order.
+/// Each part is `(text, colour)`. A run that starts inside the line starts a new part; the part before it keeps the colour of the run it was in.
+pub fn cut_runs(piece: &str, at: usize, runs: &[(usize, Option<(u8, u8, u8)>)]) -> Vec<(String, Option<(u8, u8, u8)>)> {
+    let end = at + piece.len();
+    let colour_at = |pos: usize| runs.iter().rev().find(|(start, _)| *start <= pos).and_then(|(_, c)| *c);
+    let mut cuts: Vec<usize> = vec![at];
+    for (start, _) in runs {
+        if *start > at && *start < end && piece.is_char_boundary(*start - at) {
+            cuts.push(*start);
+        }
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    cuts.push(end);
+    let mut out: Vec<(String, Option<(u8, u8, u8)>)> = Vec::new();
+    for pair in cuts.windows(2) {
+        let Some(text) = piece.get(pair[0] - at..pair[1] - at) else { continue };
+        if text.is_empty() {
+            continue;
+        }
+        let colour = colour_at(pair[0]);
+        match out.last_mut() {
+            Some((last, last_colour)) if *last_colour == colour => last.push_str(text), // a colour that did not change is one part
+            _ => out.push((text.to_string(), colour)),
+        }
+    }
+    out
+}
+
+/// Like `field_lines`, but every line comes as its coloured parts (see `cut_runs`): the time, the name and the speech of a chat line each in the colour the movie gave it.
+pub fn field_runs(name: &str, count: usize) -> Option<Vec<Vec<(String, Option<(u8, u8, u8)>)>>> {
+    use crate::player::cast_member::CastMemberType;
+    crate::player::reserve_player_ref(|player| {
+        let member_ref = player.movie.cast_manager.find_member_ref_by_name(name)?;
+        let member = player.movie.cast_manager.find_member_by_ref(&member_ref)?;
+        let CastMemberType::Field(field) = &member.member_type else { return None };
+        let runs: Vec<(usize, Option<(u8, u8, u8)>)> = field.current_runs().iter().map(|r| (r.start_position as usize, run_colour(r))).collect();
+        let mut lines = Vec::new();
+        let mut start = 0usize;
+        for piece in field.text.split(|c| c == '\r' || c == '\n').map(str::to_owned).collect::<Vec<_>>() {
+            let at = start;
+            start += piece.len() + 1;
+            if piece.trim().is_empty() {
+                continue;
+            }
+            lines.push(cut_runs(&piece, at, &runs));
+        }
+        let skip = lines.len().saturating_sub(count);
+        Some(lines.split_off(skip))
+    })
+}
+
+#[cfg(test)]
+mod run_tests {
+    use super::cut_runs;
+
+    #[test]
+    fn a_chat_line_is_cut_where_its_colour_changes() {
+        let grey = Some((143, 143, 143));
+        let blue = Some((90, 160, 255));
+        // "[17:43] Tester says hi" with the time grey, the name blue and the rest inherited
+        let parts = cut_runs("[17:43] Tester says hi", 100, &[(0, None), (100, grey), (108, blue), (115, None)]);
+        assert_eq!(parts, vec![("[17:43] ".to_string(), grey), ("Tester ".to_string(), blue), ("says hi".to_string(), None)]);
+    }
+
+    #[test]
+    fn a_line_in_one_colour_is_one_part_and_runs_outside_it_are_ignored() {
+        let white = Some((255, 255, 255));
+        assert_eq!(cut_runs("hello", 10, &[(0, white), (40, None)]), vec![("hello".to_string(), white)]);
+        // two runs of the same colour in a row are still one part
+        assert_eq!(cut_runs("hello", 0, &[(0, white), (2, white)]), vec![("hello".to_string(), white)]);
+    }
+
+    #[test]
+    fn a_cut_never_lands_inside_a_character() {
+        let a = Some((1, 2, 3));
+        // the diamond is three bytes; a run that "starts" inside it is not a cut
+        let parts = cut_runs("a\u{25C6}b", 0, &[(0, a), (2, None)]);
+        assert_eq!(parts, vec![("a\u{25C6}b".to_string(), a)]);
     }
 }
 

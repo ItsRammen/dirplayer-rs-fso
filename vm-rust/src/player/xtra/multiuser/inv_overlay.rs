@@ -35,15 +35,35 @@ pub fn icon(name: &str) -> Option<Icon> {
     crate::player::reserve_player_ref(|player| {
         let member_ref = player.movie.cast_manager.find_member_ref_by_name(name)?;
         let member = player.movie.cast_manager.find_member_by_ref(&member_ref)?;
-        let CastMemberType::Bitmap(bitmap_member) = &member.member_type else { return None };
-        let bitmap = player.bitmap_manager.get_bitmap(bitmap_member.image_ref)?;
-        let palettes = player.movie.cast_manager.palettes();
-        let rgba = crate::rendering_gpu::webgl2::WebGL2Renderer::bitmap_to_rgba(bitmap, &palettes, 0, None, None, None, (0, 0), false);
-        let (width, height) = (bitmap.width as usize, bitmap.height as usize);
+        let CastMemberType::Bitmap(_) = &member.member_type else { return None };
+        let found = bitmap_of(player, &member_ref)?;
         // Only item-sized pictures: a name that happens to belong to a stage graphic is not an icon.
-        if width == 0 || height == 0 || width > 128 || height > 128 || rgba.len() != width * height * 4 {
+        if found.width > 128 || found.height > 128 {
             return None;
         }
-        Some(Icon { width, height, has_alpha: bitmap.original_bit_depth == 32 && bitmap.use_alpha, rgba })
+        Some(found)
     })
+}
+
+/// A piece of the game's own interface art (a panel, an arrow, a button) by cast library and member number, at any size. The Modern UI draws the Original
+/// interface's extra controls from these, so they look like the rest of the frame.
+pub fn member_image(cast_lib: i32, cast_member: i32) -> Option<Icon> {
+    crate::player::reserve_player_ref(|player| {
+        let member_ref = crate::player::cast_lib::CastMemberRef { cast_lib, cast_member };
+        bitmap_of(player, &member_ref)
+    })
+}
+
+fn bitmap_of(player: &crate::player::DirPlayer, member_ref: &crate::player::cast_lib::CastMemberRef) -> Option<Icon> {
+    use crate::player::cast_member::CastMemberType;
+    let member = player.movie.cast_manager.find_member_by_ref(member_ref)?;
+    let CastMemberType::Bitmap(bitmap_member) = &member.member_type else { return None };
+    let bitmap = player.bitmap_manager.get_bitmap(bitmap_member.image_ref)?;
+    let palettes = player.movie.cast_manager.palettes();
+    let rgba = crate::rendering_gpu::webgl2::WebGL2Renderer::bitmap_to_rgba(bitmap, &palettes, 0, None, None, None, (0, 0), false);
+    let (width, height) = (bitmap.width as usize, bitmap.height as usize);
+    if width == 0 || height == 0 || rgba.len() != width * height * 4 {
+        return None;
+    }
+    Some(Icon { width, height, has_alpha: bitmap.original_bit_depth == 32 && bitmap.use_alpha, rgba })
 }

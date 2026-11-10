@@ -489,11 +489,45 @@ pub fn rotl_field_lines(name: &str, count: u32) -> JsValue {
     out.into()
 }
 
+/// ROTL Modern UI: like `rotl_field_lines`, but each line is `[[text, "#rrggbb" or ""], ...]`, one pair for each part of the line in its own colour (the time, the name, the speech), or null.
+#[wasm_bindgen]
+pub fn rotl_field_runs(name: &str, count: u32) -> JsValue {
+    let Some(lines) = player::xtra::multiuser::page_bridge::field_runs(name, count as usize) else { return JsValue::NULL };
+    let out = js_sys::Array::new();
+    for parts in lines {
+        let line = js_sys::Array::new();
+        for (text, colour) in parts {
+            let hex = colour.map(|(r, g, b)| format!("#{:02x}{:02x}{:02x}", r, g, b)).unwrap_or_default();
+            let pair = js_sys::Array::new();
+            pair.push(&JsValue::from_str(&text));
+            pair.push(&JsValue::from_str(&hex));
+            line.push(&pair);
+        }
+        out.push(&line);
+    }
+    out.into()
+}
+
 /// ROTL inventory overlay (prototype): the picture of an item, `{width, height, hasAlpha, data}` (RGBA bytes), or null when the movie has no
 /// bitmap of that name.
 #[wasm_bindgen]
 pub fn rotl_item_icon(name: &str) -> JsValue {
     let Some(icon) = player::xtra::multiuser::inv_overlay::icon(name) else { return JsValue::NULL };
+    let object = js_sys::Object::new();
+    let set = |key: &str, value: JsValue| {
+        let _ = js_sys::Reflect::set(&object, &JsValue::from_str(key), &value);
+    };
+    set("width", JsValue::from_f64(icon.width as f64));
+    set("height", JsValue::from_f64(icon.height as f64));
+    set("hasAlpha", JsValue::from_bool(icon.has_alpha));
+    set("data", js_sys::Uint8ClampedArray::from(&icon.rgba[..]).into());
+    object.into()
+}
+
+/// Any bitmap member of the movie as `{ width, height, hasAlpha, data }` (RGBA): the game's own interface art for the Modern UI to reuse.
+#[wasm_bindgen]
+pub fn rotl_member_image(cast_lib: i32, cast_member: i32) -> JsValue {
+    let Some(icon) = player::xtra::multiuser::inv_overlay::member_image(cast_lib, cast_member) else { return JsValue::NULL };
     let object = js_sys::Object::new();
     let set = |key: &str, value: JsValue| {
         let _ = js_sys::Reflect::set(&object, &JsValue::from_str(key), &value);
