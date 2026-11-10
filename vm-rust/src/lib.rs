@@ -524,6 +524,21 @@ pub fn rotl_item_icon(name: &str) -> JsValue {
     object.into()
 }
 
+/// Any bitmap member of the movie as `{ width, height, hasAlpha, data }` (RGBA): the game's own interface art for the Modern UI to reuse.
+#[wasm_bindgen]
+pub fn rotl_member_image(cast_lib: i32, cast_member: i32) -> JsValue {
+    let Some(icon) = player::xtra::multiuser::inv_overlay::member_image(cast_lib, cast_member) else { return JsValue::NULL };
+    let object = js_sys::Object::new();
+    let set = |key: &str, value: JsValue| {
+        let _ = js_sys::Reflect::set(&object, &JsValue::from_str(key), &value);
+    };
+    set("width", JsValue::from_f64(icon.width as f64));
+    set("height", JsValue::from_f64(icon.height as f64));
+    set("hasAlpha", JsValue::from_bool(icon.has_alpha));
+    set("data", js_sys::Uint8ClampedArray::from(&icon.rgba[..]).into());
+    object.into()
+}
+
 #[wasm_bindgen]
 pub fn player_print_member_bitmap_hex(cast_lib: i32, cast_member: i32) {
     player_dispatch(PlayerVMCommand::PrintMemberBitmapHex(CastMemberRef {
