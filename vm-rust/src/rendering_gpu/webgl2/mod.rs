@@ -4579,9 +4579,18 @@ impl WebGL2Renderer {
             gl.uniform1f(Some(loc), (rotation as f32).to_radians());
         }
 
-        // Set rotation center (sprite's registration point: loc_h, loc_v)
+        // Set rotation center (sprite's registration point: loc_h, loc_v). The sprite's vertices are
+        // in drawRect space (get_concrete_sprite_render_rect scales them), so the pivot has to be
+        // too: left in movie coordinates, a spinning sprite orbits a point that is only right at 1x.
         if let Some(ref loc) = u_rotation_center {
-            gl.uniform2f(Some(loc), raw_loc.0 as f32, raw_loc.1 as f32);
+            let layout = crate::player::stage::stage_layout(player);
+            let (sx, sy) = crate::player::stage::stage_scale(player);
+            let (cx, cy) = if (sx - 1.0).abs() < 1e-6 && (sy - 1.0).abs() < 1e-6 {
+                (raw_loc.0 as f64, raw_loc.1 as f64)
+            } else {
+                (layout.draw_rect[0] + raw_loc.0 as f64 * sx, layout.draw_rect[1] + raw_loc.1 as f64 * sy)
+            };
+            gl.uniform2f(Some(loc), cx as f32, cy as f32);
         }
 
         // Set blend (0-100 -> 0.0-1.0)
