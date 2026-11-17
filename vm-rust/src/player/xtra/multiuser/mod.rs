@@ -9,7 +9,7 @@ pub mod page_bridge;
 #[cfg(feature = "rotl-secure-login")]
 pub mod secure_login;
 
-use std::collections::VecDeque;
+use std::{cell::Cell, collections::VecDeque, rc::Rc};
 use async_std::{channel::Sender, task::spawn_local};
 use binary_reader::BinaryReader;
 use fxhash::FxHashMap;
@@ -55,6 +55,11 @@ pub struct MultiuserXtraInstance {
     pub connection_mode: MultiuserConnectionMode,
     pub sender_id: String,
     pub recv_buffer: Vec<u8>,
+    /// The connection's socket, kept so it can be closed when the movie lets go of this instance (see `hang_up`).
+    pub socket: Option<WebSocket>,
+    /// Shared with the connection's send loop: set once the movie has let go of the instance, so the loop closes the
+    /// socket after sending what the movie had already queued.
+    pub close_when_drained: Rc<Cell<bool>>,
     /// Set when this connection logs in with OPAQUE instead of sending the password (see `secure_login`).
     #[cfg(feature = "rotl-secure-login")]
     pub secure_login: Option<secure_login::SecureLogin>,
@@ -79,6 +84,28 @@ fn take_login_ticket(username: &str) -> Option<String> {
 }
 
 impl MultiuserXtraInstance {
+    /// The movie has let go of this instance: end its connection, as the Director Xtra does when its last reference
+    /// goes. Nothing more is delivered (the socket's callbacks are taken off first, so the movie is not told about a
+    /// close it asked for either), and the socket is closed once anything the movie sent just before letting go has
+    /// gone out — ROTL's logout does `sendNetMessage(...)` and `gConnect = 0` back to back.
+    pub fn hang_up(&mut self) {
+        self.net_message_handler = None;
+        self.message_queue.clear();
+        self.close_when_drained.set(true);
+        // Dropping the sender ends the send loop, which closes the socket on its way out. With no send loop left
+        // (it ended at `breakConnection`) the socket is closed here.
+        let had_send_loop = self.socket_tx.take().is_some();
+        if let Some(socket) = self.socket.take() {
+            socket.set_onmessage(None);
+            socket.set_onerror(None);
+            socket.set_onclose(None);
+            socket.set_onopen(None);
+            if !had_send_loop {
+                let _ = socket.close();
+            }
+        }
+    }
+
     pub fn dispatch_message_handler(&self) {
         if let Some((handler_obj_ref, handler_symbol)) = &self.net_message_handler {
             let handler_symbol = handler_symbol.clone();
@@ -249,6 +276,8 @@ impl MultiuserXtraManager {
                 connection_mode: MultiuserConnectionMode::Binary,
                 sender_id: String::new(),
                 recv_buffer: Vec::new(),
+                socket: None,
+                close_when_drained: Rc::new(Cell::new(false)),
                 #[cfg(feature = "rotl-secure-login")]
                 secure_login: None,
                 #[cfg(feature = "rotl-secure-login")]
@@ -452,6 +481,9 @@ impl MultiuserXtraManager {
                 let conn_generation = unsafe { crate::player::PLAYER_GENERATION };
                 let onmessage_callback = Closure::<dyn FnMut(_)>::new(move |e: MessageEvent| {
                     if unsafe { crate::player::PLAYER_GENERATION } != conn_generation { return; }
+                    // A movie that has just let go of the connection gets nothing more from it, even if this
+                    // message beat the next frame's check.
+                    release_unreferenced_instances();
                     // Handle both ArrayBuffer and String messages
                     let data = e.data();
                     let message_bytes = if let Ok(array_buffer) = data.clone().dyn_into::<js_sys::ArrayBuffer>() {
@@ -648,6 +680,10 @@ impl MultiuserXtraManager {
 
                 let (tx, rx) = async_std::channel::unbounded();
                 instance.socket_tx = Some(tx);
+                instance.socket = Some(socket.clone());
+                // A flag of this connection's own: a second connectToNetServer on the same instance starts afresh.
+                let close_when_drained = Rc::new(Cell::new(false));
+                instance.close_when_drained = close_when_drained.clone();
                 crate::player::spawn_player_local(async move {
                     while let Ok(message) = rx.recv().await {
                         // Check if WebSocket is open (readyState == 1) before sending
@@ -660,6 +696,12 @@ impl MultiuserXtraManager {
                         if let Err(e) = socket_clone.send_with_u8_array(&message) {
                             multiuser_log!("Multiuser: Failed to send message: {:?}", e);
                         }
+                    }
+                    // The sender is gone and everything queued has been sent. If that is because the movie let go
+                    // of the instance, the connection ends here (see `MultiuserXtraInstance::hang_up`).
+                    if close_when_drained.get() {
+                        multiuser_log!("Multiuser: the movie released its connection; closing the WebSocket");
+                        let _ = socket_clone.close();
                     }
                 });
 
@@ -893,9 +935,70 @@ impl MultiuserXtraManager {
     }
 
     pub fn new() -> MultiuserXtraManager {
+        unsafe { RELEASE_CANDIDATES.clear(); }
         MultiuserXtraManager {
             instances: FxHashMap::default(),
             instance_counter: 0,
+        }
+    }
+}
+
+/// Instances that lost a reference since the last check and may now have none (see `release_unreferenced_instances`).
+static mut RELEASE_CANDIDATES: Vec<u32> = Vec::new();
+
+/// Told by the allocator that a datum holding an Xtra instance was freed. That is only a hint: `Datum` is `Clone`, so
+/// several datums can hold the same instance, and this one may not have been the last.
+pub fn note_instance_datum_freed(xtra_name: &str, instance_id: u32) {
+    if !xtra_name.eq_ignore_ascii_case("multiuser") {
+        return;
+    }
+    unsafe {
+        if !RELEASE_CANDIDATES.contains(&instance_id) {
+            RELEASE_CANDIDATES.push(instance_id);
+        }
+    }
+}
+
+/// Whether any datum, in the host player or a nested `#movie` player, still holds this instance. Everything a movie
+/// can keep a value in (globals, properties, lists, handler locals, the stack) is a `DatumRef` into one of these
+/// arenas, so no hit means the movie can no longer reach the instance.
+fn instance_is_referenced(instance_id: u32) -> bool {
+    let holds = |player: &crate::player::DirPlayer| {
+        player.allocator.datums.iter().any(|(_, entry)| {
+            matches!(&entry.datum, Datum::XtraInstance(name, id) if *id == instance_id && name.eq_ignore_ascii_case("multiuser"))
+        })
+    };
+    unsafe {
+        crate::player::PLAYER_OPT.as_ref().is_some_and(&holds)
+            || crate::player::NESTED_PLAYERS.iter().flatten().any(&holds)
+    }
+}
+
+/// Ends the connection of every Multiuser instance the movie has let go of.
+///
+/// Director closes a Multiuser connection when the last reference to its Xtra instance goes; it is how movies log
+/// out (ROTL: `gConnect = 0`). Here an instance lives in the manager's table under an id and a `Datum::XtraInstance`
+/// only names that id, so nothing happened when the datum went: the socket stayed open, the character stayed online,
+/// and the server's messages kept calling the movie's handler.
+///
+/// The check is a search rather than a count because datums are freed in more than one way and copied by value. The
+/// allocator notes an instance each time a datum naming it is freed (`note_instance_datum_freed`); here, once per
+/// frame and before each incoming message, every noted instance is looked for across the live datums and released if
+/// none names it. With nothing noted — the usual case — this costs one length check.
+pub fn release_unreferenced_instances() {
+    let candidates = unsafe {
+        if RELEASE_CANDIDATES.is_empty() {
+            return;
+        }
+        std::mem::take(&mut RELEASE_CANDIDATES)
+    };
+    for instance_id in candidates {
+        if instance_is_referenced(instance_id) {
+            continue;
+        }
+        let Some(manager) = (unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut() }) else { continue };
+        if let Some(mut instance) = manager.instances.remove(&instance_id) {
+            instance.hang_up();
         }
     }
 }
@@ -911,3 +1014,83 @@ pub fn borrow_multiuser_manager_mut<T>(callback: impl FnOnce(&mut MultiuserXtraM
 // }
 
 pub static mut MULTIUSER_XTRA_MANAGER_OPT: Option<MultiuserXtraManager> = None;
+
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+    use crate::player::symbols::symbol_table::init_symbol_table;
+    use crate::player::testing::{run_test, TestPlayer};
+
+    /// `new(xtra "Multiuser")`: an instance in the manager and the datum the movie holds it by.
+    fn new_connection() -> (u32, DatumRef) {
+        let id = borrow_multiuser_manager_mut(|manager| manager.create_instance(&vec![]));
+        let datum = reserve_player_mut(|player| player.alloc_datum(Datum::XtraInstance("Multiuser".to_string(), id)));
+        (id, datum)
+    }
+
+    fn is_open(id: u32) -> bool {
+        borrow_multiuser_manager_mut(|manager| manager.instances.contains_key(&id))
+    }
+
+    /// ROTL logs out with `gConnect = 0`: the only reference goes, and the connection goes with it.
+    #[test]
+    fn the_connection_ends_when_the_movie_drops_its_only_reference() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            let (id, g_connect) = new_connection();
+            release_unreferenced_instances();
+            assert!(is_open(id), "released while the movie still held it");
+            drop(g_connect);
+            assert!(is_open(id), "released before the frame's check");
+            release_unreferenced_instances();
+            assert!(!is_open(id), "the instance outlived its last reference");
+        });
+    }
+
+    /// A second variable, a list entry, or a copy of the value all keep the connection: only the last one to go ends it.
+    #[test]
+    fn the_connection_stays_while_anything_still_refers_to_it() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            let (id, g_connect) = new_connection();
+            // The same datum reached from a second place (`other = gConnect`).
+            let second_variable = g_connect.clone();
+            // The same instance in a datum of its own (a value copy), kept inside a list.
+            let in_a_list = reserve_player_mut(|player| {
+                let copy = player.alloc_datum(Datum::XtraInstance("Multiuser".to_string(), id));
+                player.alloc_datum(Datum::List(DatumType::List, VecDeque::from(vec![copy]), false))
+            });
+
+            drop(g_connect);
+            release_unreferenced_instances();
+            assert!(is_open(id), "closed with a second variable still holding it");
+
+            drop(second_variable);
+            release_unreferenced_instances();
+            assert!(is_open(id), "closed with a copy still held in a list");
+
+            drop(in_a_list);
+            release_unreferenced_instances();
+            assert!(!is_open(id));
+        });
+    }
+
+    /// Instance ids are per Xtra, and one connection ending leaves the others alone.
+    #[test]
+    fn only_the_released_multiuser_instance_is_closed() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            let (first, first_ref) = new_connection();
+            let (second, _second_ref) = new_connection();
+            // Another Xtra's instance that happens to share the id is not a reference to the connection.
+            let _file = reserve_player_mut(|player| player.alloc_datum(Datum::XtraInstance("FileIO".to_string(), first)));
+            drop(first_ref);
+            release_unreferenced_instances();
+            assert!(!is_open(first));
+            assert!(is_open(second));
+        });
+    }
+}
