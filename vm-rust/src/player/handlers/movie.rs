@@ -702,6 +702,28 @@ impl MovieHandlers {
                 // and reload from the score (the deferred revert) when the sprite
                 // stays unpuppeted; if it is re-puppeted first, it keeps its data.
                 let sprite = player.movie.score.get_sprite_mut(sprite_number as i16);
+                // All of the above is about handing a PUPPET back to the Score.
+                // A channel that is not a puppet has nothing to hand back: the
+                // Score already drives it, and its behaviors belong to its span,
+                // not to the puppet. Director leaves such a sprite alone.
+                //
+                // Tearing it down anyway strips the behaviors off a live Score
+                // sprite, and nothing puts them back while the playhead stays
+                // inside the span (behaviors are only attached on span entry).
+                // ROTL's message handler answers a message that arrives with no
+                // connection with DropAllPuppets() — `puppetSprite w, 0` for
+                // w = 1 to 500 — so one late message after a logout took the
+                // click handler off the sign-in screen's OK button (sprite 10,
+                // never a puppet) and the player could not log back in.
+                //
+                // The cases above still take the path below whenever the channel
+                // is a puppet. When it is not: BrickOut re-puppets straight after
+                // and reads a rect that was never disturbed, and a channel with
+                // no span (Coke Studios' furniture pool) is only ever drawn while
+                // its puppet flag is set, so there is nothing on stage to clear.
+                if !sprite.puppet {
+                    return Ok(DatumRef::Void);
+                }
                 sprite.puppet = false;
                 sprite.entered = false;
                 sprite.lingo_positioned = false;
@@ -1563,5 +1585,89 @@ impl MovieHandlers {
             player.is_playing = false;
             Ok(DatumRef::Void)
         })
+    }
+}
+
+#[cfg(test)]
+mod puppet_sprite_tests {
+    use super::*;
+    use crate::player::allocator::ScriptInstanceAllocatorTrait;
+    use crate::player::script::ScriptInstance;
+    use crate::player::symbols::symbol_table::init_symbol_table;
+    use crate::player::testing::{run_test, TestPlayer};
+
+    /// A sprite the playhead is inside, with one behavior attached — the state
+    /// of a Score sprite once its span has been entered.
+    fn enter_sprite_with_behavior(channel: i16, puppet: bool) {
+        reserve_player_mut(|player| {
+            player.movie.score.set_channel_count(20);
+            let instance_id = player.allocator.get_free_script_instance_id();
+            let behavior = player.allocator.alloc_script_instance(ScriptInstance {
+                instance_id,
+                script: CastMemberRef { cast_lib: 1, cast_member: 28 },
+                ancestor: None,
+                properties: Default::default(),
+                begin_sprite_called: true,
+            });
+            let sprite = player.movie.score.get_sprite_mut(channel);
+            sprite.entered = true;
+            sprite.puppet = puppet;
+            sprite.script_instance_list = vec![behavior];
+        });
+    }
+
+    fn puppet_sprite(channel: i32, on: i32) {
+        let args = reserve_player_mut(|player| {
+            vec![player.alloc_datum(Datum::Int(channel)), player.alloc_datum(Datum::Int(on))]
+        });
+        MovieHandlers::puppet_sprite(&args).unwrap();
+    }
+
+    /// ROTL's DropAllPuppets() runs `puppetSprite w, 0` over every channel,
+    /// including Score sprites that were never puppets (the sign-in screen's OK
+    /// button). Those must keep their behaviors: nothing re-attaches them while
+    /// the playhead stays inside the span.
+    #[test]
+    fn unpuppeting_a_sprite_that_is_not_a_puppet_does_nothing() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            enter_sprite_with_behavior(10, false);
+            puppet_sprite(10, 0);
+            reserve_player_mut(|player| {
+                let sprite = player.movie.score.get_sprite_mut(10);
+                assert_eq!(sprite.script_instance_list.len(), 1, "the behavior was stripped");
+                assert!(sprite.entered, "the sprite was made to re-enter its span");
+                assert!(!sprite.pending_unpuppet_revert, "a revert was scheduled for a sprite the Score already drives");
+                assert!(!sprite.puppet);
+            });
+        });
+    }
+
+    /// The deferred revert of a real puppet is unchanged (BrickOut, Coke
+    /// Studios): the flag and the behavior lifecycle go at once, the visual
+    /// state on the next frame update.
+    #[test]
+    fn unpuppeting_a_puppet_still_hands_it_back_to_the_score() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            enter_sprite_with_behavior(10, true);
+            puppet_sprite(10, 0);
+            reserve_player_mut(|player| {
+                let sprite = player.movie.score.get_sprite_mut(10);
+                assert!(!sprite.puppet);
+                assert!(!sprite.entered);
+                assert!(sprite.script_instance_list.is_empty());
+                assert!(sprite.pending_unpuppet_revert);
+            });
+            // Re-puppeted before the next frame update: no revert (BrickOut).
+            puppet_sprite(10, 1);
+            reserve_player_mut(|player| {
+                let sprite = player.movie.score.get_sprite_mut(10);
+                assert!(sprite.puppet);
+                assert!(!sprite.pending_unpuppet_revert);
+            });
+        });
     }
 }

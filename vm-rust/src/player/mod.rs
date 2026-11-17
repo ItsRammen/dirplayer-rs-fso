@@ -6071,6 +6071,10 @@ pub async fn fire_pending_timeouts() {
 }
 
 pub async fn run_single_frame() -> (bool, bool) {
+    // A Multiuser connection the movie has let go of (`gConnect = 0`) is closed here, as Director closes it when
+    // the last reference to the Xtra instance goes.
+    xtra::multiuser::release_unreferenced_instances();
+
     let (mut is_playing, mut is_script_paused) = reserve_player_ref(|player| {
         (player.is_playing, player.is_script_paused)
     });

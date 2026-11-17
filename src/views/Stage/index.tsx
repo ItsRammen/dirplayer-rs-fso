@@ -243,6 +243,27 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
   useEffect(() => { panRef.current = pan; }, [pan]);
   useEffect(() => { panModeRef.current = panMode; }, [panMode]);
 
+  // ROTL: the page the player is embedded in can ask for a bigger stage (a "Game size" setting). It sizes this component's container and calls
+  // window.__rotlSetStageScale(scale): the scale is then snapped to whole device pixels by getEffectiveScale, the stage is centred in its container and pointer
+  // positions are mapped here as for any scale, so the page does none of that. Returns the scale in effect. A page that does not find the function does nothing.
+  useEffect(() => {
+    const w = window as unknown as { __rotlSetStageScale?: (n: number) => number };
+    w.__rotlSetStageScale = (n: number) => {
+      const s = Math.max(MIN_SCALE, Math.min(MAX_SCALE, Number(n) || 1));
+      const es = getEffectiveScale(s);
+      scaleRef.current = s;
+      effectiveScaleRef.current = es;
+      userHasPannedRef.current = false;
+      setScale(s);
+      const outer = outerRef.current;
+      if (outer && stageWidth && stageHeight) {
+        setPan({ x: (outer.clientWidth - stageWidth * es) / 2, y: (outer.clientHeight - stageHeight * es) / 2 });
+      }
+      return es;
+    };
+    return () => { delete w.__rotlSetStageScale; };
+  }, [stageWidth, stageHeight]);
+
   // outer-relative coords keyed by pointerId
   const activePointersRef = useRef<Map<number, Pt>>(new Map());
   // suppresses single-finger canvas events while any multi-touch gesture is winding down

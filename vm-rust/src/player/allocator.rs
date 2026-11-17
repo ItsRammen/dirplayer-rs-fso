@@ -465,6 +465,10 @@ impl DatumAllocator {
                 Datum::BitmapRef(bm_ref) => {
                     bitmap_to_decref = Some(*bm_ref);
                 }
+                // The movie may just have let go of a Multiuser connection; the Xtra checks on the next frame.
+                Datum::XtraInstance(xtra_name, instance_id) => {
+                    crate::player::xtra::multiuser::note_instance_datum_freed(xtra_name, *instance_id);
+                }
                 _ => {}
             }
         }
