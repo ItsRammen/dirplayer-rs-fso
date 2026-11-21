@@ -821,6 +821,9 @@ impl FontMemberHandlers {
         // so the optional caret/selection overlay can map byte offsets back
         // to pixel positions.
         let mut cur_byte_offset: usize = 0;
+        // The font the context has now. Setting `ctx.font` parses the font string again in the browser, and a long chat (every word of
+        // every line is measured) set it twice per word: it is set only when it changes.
+        let mut ctx_font = String::new();
 
         for span in spans {
             if span.text.is_empty() {
@@ -842,16 +845,20 @@ impl FontMemberHandlers {
                     return;
                 }
                 let is_whitespace = is_ws.unwrap_or(false);
-                ctx.set_font(&style.font);
+                if ctx_font != style.font {
+                    ctx.set_font(&style.font);
+                    ctx_font.clone_from(&style.font);
+                }
                 let token_width = if let Some(badge) = crate::player::xtra::multiuser::vip_badge::badge_of(token_text) {
                     // A chat badge is drawn as a small picture, not as its character: it takes the picture's width.
+                    // `badge_width` sets the badge's own font on the context.
+                    ctx_font.clear();
                     crate::player::xtra::multiuser::vip_badge::badge_width(&ctx, style.size_px, badge)
                 } else {
                     ctx.measure_text(token_text)
                         .map(|m| m.width())
                         .unwrap_or_else(|_| token_text.chars().count() as f64 * (style.size_px * 0.55))
                 };
-                ctx.set_font(&style.font);
 
                 // If the line has a tab marker, text after the tab is positioned by
                 // the tab stop (e.g. right-aligned), so it doesn't increase line width
@@ -1092,7 +1099,13 @@ impl FontMemberHandlers {
 
             let mut x = x_start.max(0.0);
             let mut tab_index = 0usize;
-            for (seg_i, segment) in line.segments.iter().enumerate() {
+            // A line wholly above the canvas (a chat scrolled to its newest lines has its whole history up there) is laid out but not
+            // drawn: drawing it cost a fillText per word, and each of its words added a colour rect that every text pixel was then tested
+            // against, so a message in a long chat took longer and longer, and much longer when the stage is drawn bigger (Game size).
+            // The bound is generous (a glyph can reach below its font size), so nothing that shows is skipped.
+            let line_bottom_on_canvas = y + start_y as f64 + line.max_font_px.max(fixed_line_space as f64) * 2.0 + 4.0;
+            let line_segments: &[NativeSegment] = if line_bottom_on_canvas < 0.0 { &[] } else { &line.segments };
+            for (seg_i, segment) in line_segments.iter().enumerate() {
                 if segment.is_tab {
                     // Advance to the next tab stop
                     if tab_index < tab_stops.len() {
@@ -1100,7 +1113,7 @@ impl FontMemberHandlers {
                         match stop.tab_type.as_str() {
                             "right" => {
                                 // For right-aligned tabs, measure remaining text after the tab
-                                let remaining_width: f64 = line.segments[seg_i + 1..]
+                                let remaining_width: f64 = line_segments[seg_i + 1..]
                                     .iter()
                                     .filter(|s| !s.is_tab)
                                     .map(|s| s.width)
@@ -1108,7 +1121,7 @@ impl FontMemberHandlers {
                                 x = (stop.position as f64 - remaining_width).max(x);
                             }
                             "center" => {
-                                let remaining_width: f64 = line.segments[seg_i + 1..]
+                                let remaining_width: f64 = line_segments[seg_i + 1..]
                                     .iter()
                                     .filter(|s| !s.is_tab)
                                     .map(|s| s.width)
@@ -1271,6 +1284,7 @@ impl FontMemberHandlers {
         let out_w = render_width.max(1) as usize;
         let out_h = render_height.max(1) as usize;
         let sf = scale_factor as usize;
+        let mut last_rect: Option<usize> = None;
 
         for cy in 0..out_h {
             // start_y is already baked into the canvas via ctx.translate above.
@@ -1314,14 +1328,19 @@ impl FontMemberHandlers {
                     // pixel (output coords == logical coords). segment.style.color
                     // already folds in the field default for runs with no
                     // explicit color, so unmatched pixels fall back to it too.
+                    // The rect the last pixel was in is tried first: the next pixels of a row are mostly in the same word.
                     let (fg_r, fg_g, fg_b) = {
                         let fx = cx as f64;
                         let fy = cy as f64;
-                        seg_color_rects
-                            .iter()
-                            .find(|&&(x0, x1, yt, yb, _)| fx >= x0 && fx < x1 && fy >= yt && fy < yb)
-                            .map(|&(_, _, _, _, c)| c)
-                            .unwrap_or(fallback_color)
+                        let inside = |&(x0, x1, yt, yb, _): &(f64, f64, f64, f64, (u8, u8, u8))| fx >= x0 && fx < x1 && fy >= yt && fy < yb;
+                        let hit = match last_rect.filter(|&i| inside(&seg_color_rects[i])) {
+                            Some(i) => Some(i),
+                            None => seg_color_rects.iter().position(|r| inside(r)),
+                        };
+                        if hit.is_some() {
+                            last_rect = hit;
+                        }
+                        hit.map(|i| seg_color_rects[i].4).unwrap_or(fallback_color)
                     };
                     bitmap.data[dest_idx] = fg_r;
                     bitmap.data[dest_idx + 1] = fg_g;
