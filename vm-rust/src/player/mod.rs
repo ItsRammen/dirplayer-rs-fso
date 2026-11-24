@@ -50,6 +50,8 @@ pub mod xtra;
 pub mod score_keyframes;
 pub mod stream_status;
 pub mod virtual_scripts;
+pub mod rotl_hooks;
+pub mod rotl_solid;
 pub mod console;
 pub mod testing_shared;
 #[cfg(not(target_arch = "wasm32"))]
@@ -5271,25 +5273,37 @@ pub async fn player_call_script_handler_raw_args(
         FrameTransfer::Done => {
             // Teardown the current frame (trace exit, record result, pop scope,
             // handler-depth--/in_frame_script reset).
-            let result = reserve_player_mut(|player| {
+            // ROTL: a page hook on this handler (`rotl_hooks`) gets the frame's script and arguments before the frame goes.
+            let hooked = rotl_hooks::wants(&handler_name);
+            let (result, returning) = reserve_player_mut(|player| {
                 if player.movie.trace_script {
                     trace_output(player, "--> end");
                 }
-                let result = {
+                let (result, returning) = {
                     let scope = player.scopes.get(scope_ref).unwrap();
                     player.last_handler_result = scope.return_value.clone();
-                    ScopeResult {
+                    let returning = hooked.then(|| rotl_hooks::Returning {
+                        script: scope.script_ref.clone(),
+                        handler_name_id: scope.handler_name_id,
+                        args: scope.args.clone(),
+                    });
+                    (ScopeResult {
                         passed: scope.passed,
                         return_value: scope.return_value.clone(),
-                    }
+                    }, returning)
                 };
                 player.pop_scope();
                 player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
                 if is_frame_script {
                     player.in_frame_script = false;
                 }
-                result
+                (result, returning)
             });
+
+            // ROTL: Lingo the page asked to run after this handler (`rotl_hooks`); nothing when none is registered.
+            if let Some(returning) = returning {
+                rotl_hooks::run_after(&handler_name, returning).await;
+            }
 
             match parents.pop() {
                 // Entry frame finished: return its result to the caller.

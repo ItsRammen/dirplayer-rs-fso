@@ -44,9 +44,22 @@ const SUBJECTS: &[&str] = &[
     "UserList",
 ];
 
+/// Any subject starting with this is the page's own, whatever follows (`RotlPageNoticeBoard`, `RotlPageHallOfLegends` ...), so a new
+/// window on the page needs no new player: the server sends it, the page's `__rotlMsg` takes it. The movie uses no subject like it
+/// (checked against its 277 subjects). Only from the server: a message another player's game sent never goes to the page this way.
+pub const PAGE_PREFIX: &str = "RotlPage";
+/// The sender the server's own messages carry.
+const SERVER_SENDER: &str = "System";
+
+/// Whether a message of this subject from this sender may be offered to the page: a listed subject, or the page's prefix from the server.
+pub fn may_offer(subject: &str, sender: &str) -> bool {
+    SUBJECTS.contains(&subject)
+        || (subject.len() > PAGE_PREFIX.len() && subject.starts_with(PAGE_PREFIX) && sender.eq_ignore_ascii_case(SERVER_SENDER))
+}
+
 /// True when the page took the message and the movie should not see it.
-pub fn offer(subject: &str, content: &str) -> bool {
-    if !SUBJECTS.contains(&subject) {
+pub fn offer(subject: &str, sender: &str, content: &str) -> bool {
+    if !may_offer(subject, sender) {
         return false;
     }
     #[cfg(target_arch = "wasm32")]
@@ -72,17 +85,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_page_prefix_is_the_pages_from_the_server_only() {
+        assert!(may_offer("RotlPageNoticeBoard", "System") && may_offer("RotlPageHallOfLegends", "system"));
+        assert!(!may_offer("RotlPageNoticeBoard", "Ann"), "another player's game cannot reach the page");
+        assert!(!may_offer("RotlPage", "System"), "the prefix alone is not a subject");
+        assert!(!may_offer("rotlpageX", "System") && !may_offer("XRotlPage", "System"));
+        assert!(may_offer("FoeList", "System") && may_offer("FoeList", "Ann"), "listed subjects as before");
+        assert!(!offer("RotlPageNoticeBoard", "System", "{}"), "off the web nothing is taken");
+    }
+
+    #[test]
     fn only_the_listed_subjects_are_offered() {
         // Off the web there is no page, so nothing is ever taken; the list is what matters.
-        assert!(!offer("Hirelings", "Ranger:Ann:1"));
-        assert!(!offer("TypChatMsg", "hello"));
+        assert!(!offer("Hirelings", "System", "Ranger:Ann:1"));
+        assert!(!offer("TypChatMsg", "System", "hello"));
         assert!(SUBJECTS.contains(&"Hirelings") && !SUBJECTS.contains(&"chatMsg") && !SUBJECTS.contains(&"MailUpdate"));
-        assert!(SUBJECTS.contains(&"FriendsAll") && !offer("FriendsAll", "Ann:1"));
-        assert!(SUBJECTS.contains(&"FoeList") && !offer("FoeList", "[]"));
-        assert!(SUBJECTS.contains(&"GuildState") && !offer("GuildState", "NONE"));
-        assert!(SUBJECTS.contains(&"GuildInviteOffer") && !offer("GuildInviteOffer", "{}"));
-        assert!(SUBJECTS.contains(&"UserList") && !offer("UserList", "[\"AllUsers\", 1, [\"Ann\"]]") && !SUBJECTS.contains(&"UserListPluskick"));
-        assert!(SUBJECTS.contains(&"HirBatViewGoGoGo") && !offer("HirBatViewGoGoGo", "Rat:Mozart:1")); assert!(SUBJECTS.contains(&"uBio1") && !offer("uBio1", "Ann:20:Body1-Head1") && SUBJECTS.contains(&"MonsterKills") && SUBJECTS.contains(&"MonsterKillsTOTAL") && !SUBJECTS.contains(&"NPCBio"));
+        assert!(SUBJECTS.contains(&"FriendsAll") && !offer("FriendsAll", "System", "Ann:1"));
+        assert!(SUBJECTS.contains(&"FoeList") && !offer("FoeList", "System", "[]"));
+        assert!(SUBJECTS.contains(&"GuildState") && !offer("GuildState", "System", "NONE"));
+        assert!(SUBJECTS.contains(&"GuildInviteOffer") && !offer("GuildInviteOffer", "System", "{}"));
+        assert!(SUBJECTS.contains(&"UserList") && !offer("UserList", "System", "[\"AllUsers\", 1, [\"Ann\"]]") && !SUBJECTS.contains(&"UserListPluskick"));
+        assert!(SUBJECTS.contains(&"HirBatViewGoGoGo") && !offer("HirBatViewGoGoGo", "System", "Rat:Mozart:1")); assert!(SUBJECTS.contains(&"uBio1") && !offer("uBio1", "System", "Ann:20:Body1-Head1") && SUBJECTS.contains(&"MonsterKills") && SUBJECTS.contains(&"MonsterKillsTOTAL") && !SUBJECTS.contains(&"NPCBio"));
     }
 }
 

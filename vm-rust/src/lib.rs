@@ -2223,6 +2223,84 @@ pub fn eval_command(command: String) {
     });
 }
 
+/// ROTL after hooks (`player::rotl_hooks`): run `lingo` (one statement a line, as `do`) each time the movie handler named by `key`
+/// (`"<script name>:<handler>"`, e.g. `"INVENTORY SORT:LoadInf"`) returns. The lines are parsed now; empty `lingo` removes the hook.
+/// Returns `{ ok: true, lines }`, or `{ ok: false, error }` (a line that cannot be read, a bad key) with nothing registered.
+#[wasm_bindgen]
+pub fn rotl_after_handler(key: String, lingo: String) -> JsValue {
+    let object = js_sys::Object::new();
+    let set = |k: &str, v: JsValue| {
+        let _ = js_sys::Reflect::set(&object, &JsValue::from_str(k), &v);
+    };
+    match crate::player::rotl_hooks::set_after(&key, &lingo) {
+        Ok(lines) => {
+            set("ok", JsValue::TRUE);
+            set("lines", JsValue::from_f64(lines as f64));
+        }
+        Err(error) => {
+            set("ok", JsValue::FALSE);
+            set("error", JsValue::from_str(&error));
+        }
+    }
+    object.into()
+}
+
+/// ROTL: what the page needs to know about the after hooks: `{ version, hooks: [key, ...], runs, errors, recent: [[key, message], ...] }`.
+/// A page checks for this export (and `version`) before it relies on hooks; an older player has neither.
+#[wasm_bindgen]
+pub fn rotl_hooks_info() -> JsValue {
+    use crate::player::rotl_hooks;
+    let object = js_sys::Object::new();
+    let set = |k: &str, v: JsValue| {
+        let _ = js_sys::Reflect::set(&object, &JsValue::from_str(k), &v);
+    };
+    set("version", JsValue::from_f64(rotl_hooks::VERSION as f64));
+    let hooks = js_sys::Array::new();
+    for key in rotl_hooks::keys() {
+        hooks.push(&JsValue::from_str(&key));
+    }
+    set("hooks", hooks.into());
+    set("runs", JsValue::from_f64(rotl_hooks::runs() as f64));
+    set("errors", JsValue::from_f64(rotl_hooks::error_count() as f64));
+    let recent = js_sys::Array::new();
+    for (key, message) in rotl_hooks::recent_errors() {
+        let pair = js_sys::Array::new();
+        pair.push(&JsValue::from_str(&key));
+        pair.push(&JsValue::from_str(&message));
+        recent.push(&pair);
+    }
+    set("recent", recent.into());
+    set("pagePrefix", JsValue::from_str(crate::player::xtra::multiuser::page_bridge::PAGE_PREFIX));
+    object.into()
+}
+
+/// ROTL solid map objects (`player::rotl_solid`): add object names (one a line) to the movie's list of solid objects (field `item49`),
+/// so a decoration of that name blocks walking without a Hidden Block. Returns `{ ok: true, added: [...] }` or `{ ok: false, error }`
+/// (a bad name, or the movie not loaded yet: try again). Takes effect the next time a map's objects are drawn.
+#[wasm_bindgen]
+pub fn rotl_solid_objects_add(names: String) -> JsValue {
+    let object = js_sys::Object::new();
+    let set = |k: &str, v: JsValue| {
+        let _ = js_sys::Reflect::set(&object, &JsValue::from_str(k), &v);
+    };
+    let list: Vec<&str> = names.split(|c| c == '\n' || c == '\r').map(str::trim).filter(|s| !s.is_empty()).collect();
+    match crate::player::rotl_solid::add(&list) {
+        Ok(added) => {
+            set("ok", JsValue::TRUE);
+            let out = js_sys::Array::new();
+            for name in added {
+                out.push(&JsValue::from_str(&name));
+            }
+            set("added", out.into());
+        }
+        Err(error) => {
+            set("ok", JsValue::FALSE);
+            set("error", JsValue::from_str(&error));
+        }
+    }
+    object.into()
+}
+
 /// Check if WebGL2 is supported in the browser
 #[wasm_bindgen]
 pub fn is_webgl2_supported() -> bool {
