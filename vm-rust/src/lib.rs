@@ -2662,6 +2662,30 @@ pub fn mcp_disassemble_handler(cast_lib: i32, cast_member: i32, handler_name: St
     })
 }
 
+/// ROTL Lingo patches (player::lingo_patch). A page can tell whether the player has them by
+/// `typeof vm.rotl_lingo_set_patches === 'function'`; every call answers with JSON that carries `api`.
+///
+/// Hands the player a manifest of handler sources: `{"version":1,"patches":[{"cast","member","handler","source","stock"}]}`.
+/// Given before the movie is loaded, it is applied when the casts are in and before any script runs; given
+/// later, it is applied at once and each result says `late`. A page can also set `window.__rotlLingoPatches`
+/// to the manifest before the player script loads, which needs no call at all.
+#[wasm_bindgen]
+pub fn rotl_lingo_set_patches(manifest_json: &str) -> String {
+    reserve_player_mut(|player| serde_json::to_string(&player::lingo_patch::set_patches(player, manifest_json)).unwrap_or_default())
+}
+
+/// What happened to each patch: applied, or refused and why.
+#[wasm_bindgen]
+pub fn rotl_lingo_status() -> String {
+    player::lingo_patch::status_json()
+}
+
+/// Puts every replaced handler back to the movie's own and forgets the manifest.
+#[wasm_bindgen]
+pub fn rotl_lingo_clear_patches() -> String {
+    reserve_player_mut(|player| serde_json::to_string(&player::lingo_patch::clear_patches(player)).unwrap_or_default())
+}
+
 #[wasm_bindgen]
 pub fn mcp_decompile_handler(cast_lib: i32, cast_member: i32, handler_name: String) -> String {
     reserve_player_ref(|player| {

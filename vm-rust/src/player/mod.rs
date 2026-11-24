@@ -32,6 +32,7 @@ pub mod interp_stats;
 pub mod js_lingo;
 pub mod js_lingo_loader;
 pub mod keyboard;
+pub mod lingo_patch;
 pub mod keyboard_events;
 pub mod keyboard_map;
 pub mod mcp;
@@ -1483,6 +1484,12 @@ impl DirPlayer {
                 &mut self.dir_cache,
             )
             .await;
+
+        // Handlers the page replaces (ROTL Lingo patches): compiled and swapped in now, with the casts
+        // loaded and before any script has run. Only for the main movie, not a movie inside a sprite.
+        if unsafe { ACTIVE_PLAYER_ID } == 0 {
+            crate::player::lingo_patch::apply_at_load(self);
+        }
 
         // Apply fake movie path override if set (moviePath/movieName use
         // this, but net_manager.base_path stays real for actual file
@@ -7676,6 +7683,7 @@ fn bench_minimal_script() -> crate::player::script::Script {
             literals: vec![],
             handlers: vec![],
             property_name_ids: vec![],
+        global_name_ids: vec![],
             property_defaults: HashMap::new(),
         },
         script_type: ScriptType::Movie,

@@ -7,6 +7,7 @@ pub mod enums;
 pub mod handler;
 pub mod code_writer;
 pub mod tokenizer;
+pub mod printer;
 
 pub use handler::{decompile_handler, DecompiledHandler, DecompiledLine};
 pub use tokenizer::{tokenize_line, Span, TokenType};
