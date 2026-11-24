@@ -6022,6 +6022,44 @@ pub fn find_field_scrollbar_at(
     None
 }
 
+/// Topmost visible `#scroll` field whose box contains the stage point and whose
+/// text is taller than the box, with its scrollbar geometry. This is what the
+/// mouse wheel and a finger drag scroll: the whole box, not only the bar, as a
+/// scrolling field does in Director on a desktop (ROTL's home teleport list held
+/// more names than its box and only the 12-pixel arrows moved it).
+///
+/// Like `find_field_scrollbar_at`, not routed through `get_sprite_at`: a
+/// read-only field is click-through there, and the list is read-only.
+pub fn find_scrollable_field_at(
+    player: &DirPlayer,
+    x: i32,
+    y: i32,
+) -> Option<(i16, FieldScrollbar)> {
+    for channel in player
+        .movie
+        .score
+        .get_sorted_channels(player.movie.current_frame)
+        .iter()
+        .rev()
+    {
+        let sprite = &channel.sprite;
+        if !sprite.visible {
+            continue;
+        }
+        let Some(sb) = get_field_scrollbar(player, sprite) else {
+            continue;
+        };
+        if sb.max_scroll <= 0 {
+            continue;
+        }
+        let rect = get_concrete_sprite_rect(player, sprite);
+        if x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom {
+            return Some((sprite.number as i16, sb));
+        }
+    }
+    None
+}
+
 /// `get_field_scrollbar` for callers that already hold the field and its rect
 /// (the renderer), so both paths derive identical geometry.
 pub fn field_scrollbar_for(

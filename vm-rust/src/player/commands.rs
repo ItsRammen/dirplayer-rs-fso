@@ -223,6 +223,49 @@ fn handle_field_scrollbar_mouse_down(
     true
 }
 
+thread_local! {
+    /// The part of a wheel or finger movement smaller than one pixel of the
+    /// movie, kept for the next one so a slow trackpad or a zoomed stage still
+    /// scrolls: (sprite, movie pixels).
+    static FIELD_SCROLL_CARRY: std::cell::Cell<(i16, f64)> = std::cell::Cell::new((0, 0.0));
+}
+
+/// Mouse wheel or a finger drag at movie point (`x`, `y`): scrolls the
+/// `#scroll` field under it by `delta_y` movie pixels (positive shows the text
+/// further down) and returns true. Returns false, changing nothing, when no
+/// field there has more text than fits, so the caller lets the page scroll.
+/// A `delta_y` of 0 only asks whether there is one.
+pub fn scroll_field_at(player: &mut crate::player::DirPlayer, x: i32, y: i32, delta_y: f64) -> bool {
+    use crate::player::score::find_scrollable_field_at;
+
+    let Some((sprite_number, sb)) = find_scrollable_field_at(player, x, y) else {
+        return false;
+    };
+    if delta_y == 0.0 || !delta_y.is_finite() {
+        return true;
+    }
+    let scroll_top = player
+        .movie
+        .score
+        .get_sprite(sprite_number)
+        .and_then(|s| s.member.as_ref())
+        .and_then(|r| player.movie.cast_manager.find_member_by_ref(r))
+        .and_then(|m| match &m.member_type {
+            CastMemberType::Field(f) => Some(f.scroll_top as i32),
+            _ => None,
+        })
+        .unwrap_or(0);
+    let (carry_sprite, carry) = FIELD_SCROLL_CARRY.with(|c| c.get());
+    let wanted = delta_y + if carry_sprite == sprite_number { carry } else { 0.0 };
+    let whole = wanted.trunc();
+    let target = (scroll_top as f64 + whole).clamp(0.0, sb.max_scroll as f64) as i32;
+    // At either end the rest is dropped, so turning back moves at once.
+    let rest = if target == 0 || target == sb.max_scroll { 0.0 } else { wanted - whole };
+    FIELD_SCROLL_CARRY.with(|c| c.set((sprite_number, rest)));
+    set_field_scroll_top(player, sprite_number, target);
+    true
+}
+
 /// Write a field's `scrollTop` and invalidate so the next frame re-rasterizes.
 fn set_field_scroll_top(player: &mut crate::player::DirPlayer, sprite_number: i16, scroll_top: i32) {
     let member_ref = player

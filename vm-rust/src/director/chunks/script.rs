@@ -13,6 +13,8 @@ pub struct ScriptChunk {
     pub literals: Vec<Datum>,
     pub handlers: Vec<HandlerDef>,
     pub property_name_ids: Vec<u16>,
+    /// Globals declared for the whole script (outside any handler).
+    pub global_name_ids: Vec<u16>,
     pub property_defaults: HashMap<u16, StaticDatum>,
 }
 
@@ -107,6 +109,7 @@ impl ScriptChunk {
             literals,
             handlers,
             property_name_ids,
+            global_name_ids,
             property_defaults,
         })
     }

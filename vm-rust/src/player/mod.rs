@@ -32,6 +32,7 @@ pub mod interp_stats;
 pub mod js_lingo;
 pub mod js_lingo_loader;
 pub mod keyboard;
+pub mod lingo_patch;
 pub mod keyboard_events;
 pub mod keyboard_map;
 pub mod mcp;
@@ -50,6 +51,7 @@ pub mod xtra;
 pub mod score_keyframes;
 pub mod stream_status;
 pub mod virtual_scripts;
+pub mod rotl_hooks;
 pub mod console;
 pub mod testing_shared;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1481,6 +1483,12 @@ impl DirPlayer {
                 &mut self.dir_cache,
             )
             .await;
+
+        // Handlers the page replaces (ROTL Lingo patches): compiled and swapped in now, with the casts
+        // loaded and before any script has run. Only for the main movie, not a movie inside a sprite.
+        if unsafe { ACTIVE_PLAYER_ID } == 0 {
+            crate::player::lingo_patch::apply_at_load(self);
+        }
 
         // Apply fake movie path override if set (moviePath/movieName use
         // this, but net_manager.base_path stays real for actual file
@@ -5271,25 +5279,37 @@ pub async fn player_call_script_handler_raw_args(
         FrameTransfer::Done => {
             // Teardown the current frame (trace exit, record result, pop scope,
             // handler-depth--/in_frame_script reset).
-            let result = reserve_player_mut(|player| {
+            // ROTL: a page hook on this handler (`rotl_hooks`) gets the frame's script and arguments before the frame goes.
+            let hooked = rotl_hooks::wants(&handler_name);
+            let (result, returning) = reserve_player_mut(|player| {
                 if player.movie.trace_script {
                     trace_output(player, "--> end");
                 }
-                let result = {
+                let (result, returning) = {
                     let scope = player.scopes.get(scope_ref).unwrap();
                     player.last_handler_result = scope.return_value.clone();
-                    ScopeResult {
+                    let returning = hooked.then(|| rotl_hooks::Returning {
+                        script: scope.script_ref.clone(),
+                        handler_name_id: scope.handler_name_id,
+                        args: scope.args.clone(),
+                    });
+                    (ScopeResult {
                         passed: scope.passed,
                         return_value: scope.return_value.clone(),
-                    }
+                    }, returning)
                 };
                 player.pop_scope();
                 player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
                 if is_frame_script {
                     player.in_frame_script = false;
                 }
-                result
+                (result, returning)
             });
+
+            // ROTL: Lingo the page asked to run after this handler (`rotl_hooks`); nothing when none is registered.
+            if let Some(returning) = returning {
+                rotl_hooks::run_after(&handler_name, returning).await;
+            }
 
             match parents.pop() {
                 // Entry frame finished: return its result to the caller.
@@ -7662,6 +7682,7 @@ fn bench_minimal_script() -> crate::player::script::Script {
             literals: vec![],
             handlers: vec![],
             property_name_ids: vec![],
+        global_name_ids: vec![],
             property_defaults: HashMap::new(),
         },
         script_type: ScriptType::Movie,

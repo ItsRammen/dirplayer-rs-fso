@@ -55,6 +55,9 @@ pub enum LingoExpr {
     Or(Box<LingoExpr>, Box<LingoExpr>),
     Eq(Box<LingoExpr>, Box<LingoExpr>),
     Ne(Box<LingoExpr>, Box<LingoExpr>),
+    /// `a contains b`, `a starts b` (ROTL: the after hooks are written in this evaluator).
+    Contains(Box<LingoExpr>, Box<LingoExpr>),
+    Starts(Box<LingoExpr>, Box<LingoExpr>),
     Lt(Box<LingoExpr>, Box<LingoExpr>),
     Gt(Box<LingoExpr>, Box<LingoExpr>),
     Le(Box<LingoExpr>, Box<LingoExpr>),
@@ -839,6 +842,16 @@ fn parse_lingo_expr_runtime(
                 let left = lhs?;
                 let right = rhs?;
                 Ok(LingoExpr::Eq(Box::new(left), Box::new(right)))
+            }
+            Rule::contains_op => {
+                let left = lhs?;
+                let right = rhs?;
+                Ok(LingoExpr::Contains(Box::new(left), Box::new(right)))
+            }
+            Rule::starts_op => {
+                let left = lhs?;
+                let right = rhs?;
+                Ok(LingoExpr::Starts(Box::new(left), Box::new(right)))
             }
             Rule::ne_op => {
                 let left = lhs?;
@@ -2483,6 +2496,15 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 Ok(player.alloc_datum(Datum::Int(if result { 1 } else { 0 })))
             })
         },
+        LingoExpr::Contains(left, right) | LingoExpr::Starts(left, right) => {
+            let starts = matches!(expr, LingoExpr::Starts(..));
+            let left = Box::pin(eval_lingo_expr_ast_runtime(left)).await?;
+            let right = Box::pin(eval_lingo_expr_ast_runtime(right)).await?;
+            reserve_player_mut(|player| {
+                let found = lingo_contains(player, &left, &right, starts)?;
+                Ok(player.alloc_datum(Datum::Int(if found { 1 } else { 0 })))
+            })
+        },
         LingoExpr::Ne(left, right) => {
             let left = Box::pin(eval_lingo_expr_ast_runtime(left)).await?;
             let right = Box::pin(eval_lingo_expr_ast_runtime(right)).await?;
@@ -2633,6 +2655,37 @@ pub fn parse_lingo_expr_ast_runtime(rule: Rule, expr: String) -> Result<LingoExp
     }
 }
 
+/// Lingo's `contains` (and `starts`), as the compiled operator has it (`StringBytecodeHandler::contains_str`): case-insensitive; a list
+/// contains a string when one of its strings does; a symbol, number or VOID contains nothing.
+pub fn lingo_contains(player: &DirPlayer, search_in: &DatumRef, search_for: &DatumRef, starts: bool) -> Result<bool, ScriptError> {
+    let needle = player.get_datum(search_for).string_value()?.to_ascii_lowercase();
+    let test = |text: &str| {
+        let text = text.to_ascii_lowercase();
+        if starts { text.starts_with(&needle) } else { text.contains(&needle) }
+    };
+    let haystack = player.get_datum(search_in);
+    if haystack.is_list() {
+        for item in haystack.to_list()? {
+            let item = player.get_datum(item);
+            if item.is_string() && test(&item.string_value()?) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    } else if haystack.is_string() {
+        Ok(test(&haystack.string_value()?))
+    } else if haystack.is_symbol() || haystack.is_number() || haystack.is_void() {
+        Ok(false)
+    } else {
+        Err(ScriptError::new(format!("`{}` needs a string to search", if starts { "starts" } else { "contains" })))
+    }
+}
+
+/// One statement (as a line of `do "..."`), parsed but not run: the ROTL after hooks parse their lines once (`rotl_hooks`).
+pub fn parse_lingo_command_ast(line: &str) -> Result<LingoExpr, ScriptError> {
+    parse_lingo_expr_ast_runtime(Rule::command_eval_expr, line.to_string())
+}
+
 pub async fn eval_lingo_expr_runtime(expr: String) -> Result<DatumRef, ScriptError> {
     let ast = parse_lingo_expr_ast_runtime(Rule::eval_expr, expr)?;
     eval_lingo_expr_ast_runtime(&ast).await
@@ -2644,6 +2697,8 @@ fn create_lingo_pratt_parser() -> PrattParser<Rule> {
         .op(Op::infix(Rule::and_op, Assoc::Left))             // and
         .op(Op::prefix(Rule::not_op))                         // not (prefix)
         .op(Op::infix(Rule::eq_op, Assoc::Left)               // = comparison
+            | Op::infix(Rule::contains_op, Assoc::Left)       // contains, starts
+            | Op::infix(Rule::starts_op, Assoc::Left)
             | Op::infix(Rule::ne_op, Assoc::Left)             // <>
             | Op::infix(Rule::lt_op, Assoc::Left)             // 
             | Op::infix(Rule::gt_op, Assoc::Left)             // >

@@ -10,6 +10,12 @@ edition = "2024"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# The Lingo command-line tool (list, show, compile, check ...): a native developer tool, never part of the
+# player. `cargo build --release --bin rotl-lingo`. Its source is outside src/bin, which .gitignore skips.
+[[bin]]
+name = "rotl-lingo"
+path = "src/tools/rotl_lingo.rs"
+
 [features]
 default = ["console_error_panic_hook"]
 word_hard_break = []

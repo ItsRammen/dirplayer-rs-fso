@@ -2857,8 +2857,19 @@ impl WebGL2Renderer {
                     // sprite width fit "Goombahs, Ghosts or Bowser --" on
                     // one line, while Director correctly wraps after
                     // "Ghosts or".
+                    // `field.width` is in movie pixels, and `width` (the sprite rect) is in drawRect pixels: when the stage is drawn bigger
+                    // (ROTL's Game size sets a drawRect of 1.25x to 3x) the text is rasterised at that scale too, so the wrap width is
+                    // scaled with it. Left unscaled, the chat wrapped at two thirds of its box at 150%, more lines than the movie counts
+                    // for its scroll, so the newest lines were cut off below the box.
                     let wrap_width = if field_member.width > 0 {
-                        (field_member.width as u32).min(width)
+                        let (sx, sy) = crate::player::stage::stage_scale(player);
+                        let text_scale = sx.min(sy);
+                        let field_w = if (text_scale - 1.0).abs() < 1e-6 {
+                            field_member.width as u32
+                        } else {
+                            ((field_member.width as f64) * text_scale).round().max(1.0) as u32
+                        };
+                        field_w.min(width)
                     } else {
                         width
                     };
