@@ -2274,33 +2274,6 @@ pub fn rotl_hooks_info() -> JsValue {
     object.into()
 }
 
-/// ROTL solid map objects (`player::rotl_solid`): add object names (one a line) to the movie's list of solid objects (field `item49`),
-/// so a decoration of that name blocks walking without a Hidden Block. Returns `{ ok: true, added: [...] }` or `{ ok: false, error }`
-/// (a bad name, or the movie not loaded yet: try again). Takes effect the next time a map's objects are drawn.
-#[wasm_bindgen]
-pub fn rotl_solid_objects_add(names: String) -> JsValue {
-    let object = js_sys::Object::new();
-    let set = |k: &str, v: JsValue| {
-        let _ = js_sys::Reflect::set(&object, &JsValue::from_str(k), &v);
-    };
-    let list: Vec<&str> = names.split(|c| c == '\n' || c == '\r').map(str::trim).filter(|s| !s.is_empty()).collect();
-    match crate::player::rotl_solid::add(&list) {
-        Ok(added) => {
-            set("ok", JsValue::TRUE);
-            let out = js_sys::Array::new();
-            for name in added {
-                out.push(&JsValue::from_str(&name));
-            }
-            set("added", out.into());
-        }
-        Err(error) => {
-            set("ok", JsValue::FALSE);
-            set("error", JsValue::from_str(&error));
-        }
-    }
-    object.into()
-}
-
 /// Check if WebGL2 is supported in the browser
 #[wasm_bindgen]
 pub fn is_webgl2_supported() -> bool {
