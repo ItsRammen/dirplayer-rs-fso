@@ -15,6 +15,7 @@
 //!                         [--include-disabled]             (also the ones not enabled: for a rig, never for a release)
 //!   rotl-lingo run        [--patch f.ls]... --eval "..."   load the movie in a native player, apply patches, run Lingo
 //!                         [--global Name]... [--offline]   (--global prints a global; --offline stubs the connection)
+//!                         [--hook "Script:handler=..."]... (an after hook, as the page registers one: see player/rotl_hooks.rs)
 //!
 //! The game's config comes from `--config <file>` or `$ROTL_LINGO_CONFIG` (see `ToolConfig` in compiler/movie.rs): which
 //! names are connection code, and what `run --offline` stands in for. Nothing about any game is built in; without a
@@ -97,6 +98,9 @@ fn parse_args() -> Args {
             "--eval" => args.evals.push(value("--eval")),
             // In `run`, read a global after the Lingo before it has run: `--eval "Foo()" --global Result`.
             "--global" => args.evals.push(format!("\u{1}{}", value("--global"))),
+            // In `run`, register an after hook (player/rotl_hooks.rs) at this point of the sequence: `--hook "Script:handler=lines"`,
+            // lines separated by `\n`; nothing after the `=` removes the hook. The key ends at the first `=`.
+            "--hook" => args.evals.push(format!("\u{2}{}", value("--hook"))),
             "-h" | "--help" => usage(),
             _ if arg.starts_with("--") => fail(2, &format!("unknown option {}", arg)),
             _ => args.positional.push(arg),
@@ -765,6 +769,14 @@ fn cmd_run(args: &Args) {
                 results.push(json!({ "global": name, "ok": true, "value": text }));
                 continue;
             }
+            if let Some(hook) = code.strip_prefix('\u{2}') {
+                let (key, lingo) = hook.split_once('=').unwrap_or((hook, ""));
+                match vm_rust::player::rotl_hooks::set_after(key, &lingo.replace("\\n", "\n")) {
+                    Ok(lines) => results.push(json!({ "hook": key, "ok": true, "lines": lines })),
+                    Err(error) => results.push(json!({ "hook": key, "ok": false, "error": error })),
+                }
+                continue;
+            }
             let code = code.replace("\\n", "\n");
             match player.eval(&code).await {
                 Ok(value) => {
@@ -776,8 +788,12 @@ fn cmd_run(args: &Args) {
         }
     });
     let failed = results.iter().any(|r| !r["ok"].as_bool().unwrap_or(false)) || status["refused"].as_u64().unwrap_or(0) > 0;
+    let hooks = {
+        use vm_rust::player::rotl_hooks;
+        json!({ "keys": rotl_hooks::keys(), "runs": rotl_hooks::runs(), "errors": rotl_hooks::error_count(), "recent": rotl_hooks::recent_errors() })
+    };
     if json_out {
-        println!("{}", json!({ "ok": !failed, "patches": status, "results": results }));
+        println!("{}", json!({ "ok": !failed, "patches": status, "hooks": hooks, "results": results }));
     } else {
         for r in status["results"].as_array().into_iter().flatten() {
             if r["ok"].as_bool().unwrap_or(false) {
@@ -786,8 +802,16 @@ fn cmd_run(args: &Args) {
                 println!("REFUSED {}: {}", r["id"].as_str().unwrap_or(""), r["error"].as_str().unwrap_or(""));
             }
         }
+        if hooks["runs"].as_u64().unwrap_or(0) > 0 {
+            println!("hooks ran {} time(s), {} error(s)", hooks["runs"], hooks["errors"]);
+        }
         for r in &results {
-            if let Some(name) = r["global"].as_str() {
+            if let Some(key) = r["hook"].as_str() {
+                match r["error"].as_str() {
+                    Some(error) => println!("hook {} refused: {}", key, error),
+                    None => println!("hook {} ({} lines)", key, r["lines"]),
+                }
+            } else if let Some(name) = r["global"].as_str() {
                 println!("{} = {}", name, r["value"].as_str().unwrap_or(""));
             } else if r["ok"].as_bool().unwrap_or(false) {
                 println!("{}\n  => {}", r["eval"].as_str().unwrap_or(""), r["value"].as_str().unwrap_or(""));

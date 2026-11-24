@@ -1,10 +1,10 @@
 //! Lingo "after" hooks (ROTL).
 //!
-//! The page can register a few lines of Lingo to run each time one of the movie's handlers returns, for example after the movie's own
-//! `LoadInf` has worked out the character's worn look:
+//! The page can register a few lines of Lingo to run each time one of the movie's handlers returns, for example after a handler
+//! that works out what a character looks like:
 //!
 //! ```text
-//! rotl_after_handler("INVENTORY SORT:LoadInf", "if offset(\":W-Eyepatch:\", \":\" & StaticInf & \":\") > 0 then HeadImage = \"Eyepatch \" & MyHead")
+//! rotl_after_handler("My Script:WorkOutLook", "if Worn contains \"Hat\" then HeadPicture = \"Hat \" & MyHead")
 //! ```
 //!
 //! What a hook is:
@@ -13,7 +13,7 @@
 //! - **Parsed once**, when registered. A line the evaluator cannot read is refused then, with the reason, and nothing is registered.
 //! - **Run after the handler's frame is torn down**, before its caller resumes, so it sees the globals the handler left. The movie's own
 //!   bytecode always runs first and is never changed: a hook can only add to what the movie did.
-//! - **Given the handler's arguments by their own names** (`x`, `HisBody` in `DrawPlayersHead`): the lines run in a scope of their own,
+//! - **Given the handler's arguments by their own names** (`x` in `on Draw x`): the lines run in a scope of their own,
 //!   with the handler's arguments and no locals, so every other bare name is a global. Assignments go to globals.
 //! - One statement a line, through the same evaluator as `do "..."` and the console (`eval.rs`): assignments, `put`, `set ... to`,
 //!   handler calls, the one-line `if ... then ...`. No `repeat`, no multi-line `if`.
@@ -25,8 +25,10 @@
 //! - With no hook registered the cost is one thread-local read per handler return; with hooks, one hash lookup by the handler's
 //!   lower-case name (no allocation), and the script's name only when that handler has a hook.
 //!
-//! ROTL keeps hooks cosmetic (docs/lingo-hooks.md in the game's repository): they change what this client draws, never a value the
-//! movie acts on or sends.
+//! What a game lets its hooks do is the game's own rule (they change this client only; the server still decides).
+//!
+//! Tested on a real movie from the game's repository, through `rotl-lingo run --hook` (src/tools/rotl_lingo.rs): the fork has no
+//! movie and names no handler of one. Being replaced by compiled handler patches (`lingo_patch.rs`), which do the same in bytecode.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;

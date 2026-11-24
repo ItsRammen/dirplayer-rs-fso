@@ -2224,7 +2224,7 @@ pub fn eval_command(command: String) {
 }
 
 /// ROTL after hooks (`player::rotl_hooks`): run `lingo` (one statement a line, as `do`) each time the movie handler named by `key`
-/// (`"<script name>:<handler>"`, e.g. `"INVENTORY SORT:LoadInf"`) returns. The lines are parsed now; empty `lingo` removes the hook.
+/// (`"<script name>:<handler>"`) returns. The lines are parsed now; empty `lingo` removes the hook.
 /// Returns `{ ok: true, lines }`, or `{ ok: false, error }` (a line that cannot be read, a bad key) with nothing registered.
 #[wasm_bindgen]
 pub fn rotl_after_handler(key: String, lingo: String) -> JsValue {
