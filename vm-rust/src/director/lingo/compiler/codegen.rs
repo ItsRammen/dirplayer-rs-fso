@@ -81,17 +81,17 @@ const PUSHFLOAT32: u8 = 0x71;
 const GETTOPLEVELPROP: u8 = 0x72;
 
 /// `the X` names that compile to a call-like instruction (`thebuiltin`) instead of a movie property.
-/// Every name here was seen compiled that way by Director 12 in the ROTL movie.
+/// Every name here was seen compiled that way by Director 12 in a Director 12 movie (the one this was built against).
 const THE_BUILTINS: &[&str] = &[
     "clickLoc", "clickOn", "date", "frame", "key", "maxinteger", "mouseDown", "mouseH", "mouseLine", "mouseV", "mouseWord", "optionDown", "rightMouseDown", "shiftDown", "ticks", "time",
 ];
 
-/// `the X` names seen compiled as a movie property (`getmovieprop`/`setmovieprop`) in the ROTL movie.
+/// `the X` names seen compiled as a movie property (`getmovieprop`/`setmovieprop`) in a Director 12 movie (the one this was built against).
 const THE_MOVIE_PROPS_SEEN: &[&str] = &[
     "actorList", "applicationPath", "currentSpriteNum", "itemDelimiter", "keyPressed", "lastChannel", "mouseLoc", "moviePath", "platform", "runMode", "stage", "emulateMultibuttonMouse", "updateLock",
 ];
 
-/// `the X` names seen compiled as an old animation property (`get 7`/`set 7`) in the ROTL movie.
+/// `the X` names seen compiled as an old animation property (`get 7`/`set 7`) in a Director 12 movie (the one this was built against).
 const THE_ANIM_PROPS_SEEN: &[&str] = &["timer", "colorDepth"];
 
 /// Top-level objects (`_movie.x`); each has its own instruction.

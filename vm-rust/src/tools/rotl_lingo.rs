@@ -16,6 +16,10 @@
 //!   rotl-lingo run        [--patch f.ls]... --eval "..."   load the movie in a native player, apply patches, run Lingo
 //!                         [--global Name]... [--offline]   (--global prints a global; --offline stubs the connection)
 //!
+//! The game's config comes from `--config <file>` or `$ROTL_LINGO_CONFIG` (see `ToolConfig` in compiler/movie.rs): which
+//! names are connection code, and what `run --offline` stands in for. Nothing about any game is built in; without a
+//! config the tool stops, unless `--no-config` says that nothing needs hiding.
+//!
 //! The movie comes from `--movie <path>` or `$ROTL_LINGO_MOVIE`. `--json` gives machine-readable output.
 //! `<member>` is the member's number, or its name when that is unique in the cast.
 //!
@@ -30,7 +34,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use vm_rust::director::file::read_director_file_bytes;
-use vm_rust::director::lingo::compiler::movie::{redact_strings, secret_problems, static_secret_problems, Movie, PatchFile, ScriptInfo};
+use vm_rust::director::lingo::compiler::movie::{redact_strings, secret_problems, set_tool_config, static_secret_problems, tool_config, Movie, PatchFile, ScriptInfo, ToolConfig};
 use vm_rust::director::lingo::compiler::patch::{fingerprint, Refusal};
 use vm_rust::director::lingo::compiler::stock;
 
@@ -49,6 +53,8 @@ struct Args {
     all: bool,
     static_only: bool,
     edits: bool,
+    config: Option<String>,
+    no_config: bool,
 }
 
 fn usage() -> ! {
@@ -59,7 +65,7 @@ fn usage() -> ! {
 fn parse_args() -> Args {
     let mut raw = std::env::args().skip(1);
     let Some(command) = raw.next() else { usage() };
-    let mut args = Args { command, positional: Vec::new(), movie: std::env::var("ROTL_LINGO_MOVIE").ok().filter(|s| !s.is_empty()), json: false, bytecode: false, failures: false, out: None, why: None, patches: Vec::new(), evals: Vec::new(), offline: false, all: false, static_only: false, edits: false };
+    let mut args = Args { command, positional: Vec::new(), movie: std::env::var("ROTL_LINGO_MOVIE").ok().filter(|s| !s.is_empty()), json: false, bytecode: false, failures: false, out: None, why: None, patches: Vec::new(), evals: Vec::new(), offline: false, all: false, static_only: false, edits: false, config: std::env::var("ROTL_LINGO_CONFIG").ok().filter(|s| !s.is_empty()), no_config: false };
     let mut options_done = false;
     while let Some(arg) = raw.next() {
         // After `--` everything is a plain argument, so a search text may start with a dash.
@@ -81,6 +87,8 @@ fn parse_args() -> Args {
             "--offline" => args.offline = true,
             "--static" => args.static_only = true,
             "--edits" => args.edits = true,
+            "--config" => args.config = Some(value("--config")),
+            "--no-config" => args.no_config = true,
             // In `manifest`: include patch files that say `enabled: no` (for trying one on a rig).
             "--include-disabled" => args.all = true,
             "-o" | "--out" => args.out = Some(value("-o")),
@@ -683,18 +691,24 @@ fn cmd_run(args: &Args) {
     use vm_rust::player::virtual_scripts::{VirtualScriptHandler, VirtualScriptRegistry};
     use vm_rust::player::{reserve_player_mut, DirPlayer, ScriptError};
 
-    /// Stands in for the Multiuser connection, so that handlers which send a message run without a server.
-    struct OfflineConnection;
+    /// Stands in for the movie's server connection, so that handlers which send a message run without a server.
+    struct OfflineConnection {
+        handlers: Vec<String>,
+    }
     impl VirtualScriptHandler for OfflineConnection {
         fn has_handler(&self, name: Symbol) -> bool {
-            name.as_lower_str() == "sendnetmessage"
+            self.handlers.iter().any(|h| h.eq_ignore_ascii_case(name.as_lower_str()))
         }
         fn call_handler(&self, player: &mut DirPlayer, _instance: Option<&ScriptInstanceRef>, name: Symbol, _args: &Vec<DatumRef>) -> Result<Option<DatumRef>, ScriptError> {
-            if name.as_lower_str() == "sendnetmessage" {
+            if self.has_handler(name) {
                 return Ok(Some(player.alloc_datum(Datum::Int(0))));
             }
             Ok(None)
         }
+    }
+    let offline_config = tool_config().offline_connection;
+    if args.offline && offline_config.is_none() {
+        fail(2, "--offline needs `offlineConnection` in the config: the global that holds the connection, and the handlers to answer");
     }
 
     let Some(movie_path) = args.movie.clone() else { fail(2, "no movie: pass --movie <path> or set ROTL_LINGO_MOVIE") };
@@ -735,11 +749,11 @@ fn cmd_run(args: &Args) {
         });
         player.load_movie(&movie_path).await;
         status = serde_json::from_str(&vm_rust::player::lingo_patch::status_json()).unwrap_or(Value::Null);
-        if offline {
+        if let (true, Some(conn)) = (offline, offline_config.clone()) {
             reserve_player_mut(|p| {
-                let script = VirtualScriptRegistry::register(p, "RotlOfflineConnection", std::rc::Rc::new(OfflineConnection));
+                let script = VirtualScriptRegistry::register(p, "LingoToolOfflineConnection", std::rc::Rc::new(OfflineConnection { handlers: conn.handlers.clone() }));
                 let (_instance, datum) = VirtualScriptRegistry::create_instance(p, &script);
-                p.globals.insert(Symbol::from_str("gConnect"), datum);
+                p.globals.insert(Symbol::from_str(&conn.global), datum);
             });
         }
         for code in &evals {
@@ -796,6 +810,16 @@ fn main() {
         default_hook(info);
     }));
     let args = parse_args();
+    // The game's config says which handlers are connection code. Running without it would show their
+    // strings, so that has to be asked for.
+    match (&args.config, args.no_config) {
+        (Some(path), false) => {
+            let text = std::fs::read_to_string(path).unwrap_or_else(|e| fail(2, &format!("cannot read the config {}: {}", path, e)));
+            set_tool_config(ToolConfig::parse(&text).unwrap_or_else(|e| fail(2, &e)));
+        }
+        (_, true) => {}
+        (None, false) => fail(2, "no config: pass --config <file> or set ROTL_LINGO_CONFIG (the game's list of connection-code names), or --no-config to run with nothing hidden"),
+    }
     // Reading a movie parses its score, which evaluates behaviour parameters through the player.
     let needs_player = !(args.command == "run" || (args.command == "check" && args.static_only));
     let _player = if needs_player { Some(vm_rust::player::testing::TestPlayer::new()) } else { None };

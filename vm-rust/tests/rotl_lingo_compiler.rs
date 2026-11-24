@@ -4,7 +4,7 @@
 //! that what the compiler writes, the decompiler prints back and the compiler reads again to the same bytes.
 //!
 //! The second half runs on a real movie and is skipped without one:
-//!   ROTL_MOVIE=/path/to/dcrgame.dcr cargo test --test rotl_lingo_compiler -- --nocapture
+//!   ROTL_MOVIE=/path/to/movie.dcr [ROTL_LINGO_CONFIG=/path/to/config.json] cargo test --test rotl_lingo_compiler -- --nocapture
 //! It recompiles every handler of the movie and requires the movie's exact bytes, then replaces a
 //! handler in a native player and runs it.
 
@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use vm_rust::director::chunks::handler::HandlerDef;
 use vm_rust::director::chunks::script::ScriptChunk;
-use vm_rust::director::lingo::compiler::movie::{redact_strings, static_secret_problems, PatchFile};
+use vm_rust::director::lingo::compiler::movie::{redact_strings, set_tool_config, static_secret_problems, PatchFile, ToolConfig};
 use vm_rust::director::lingo::compiler::patch::{self, PatchRequest, Refusal};
 use vm_rust::director::lingo::compiler::{compile_handler, stock, CompiledHandler, Literal, NameTable, ScriptEnv};
 use vm_rust::director::lingo::datum::Datum;
@@ -332,16 +332,16 @@ fn what_the_compiler_writes_it_reads_back() {
 
 #[test]
 fn patch_file_header() {
-    let text = "-- lingo-patch 1\n-- script: Scripts/27 (INVENTORY SORT)\n-- handler: LoadInf\n-- stock: abc123\n-- enabled: no\n-- why: Shows the eyepatch.\n--   It is a head piece.\non LoadInf\nend\n";
+    let text = "-- lingo-patch 1\n-- script: Main/5 (Game Logic)\n-- handler: DrawScene\n-- stock: abc123\n-- enabled: no\n-- why: Shows the eyepatch.\n--   It is a head piece.\non DrawScene\nend\n";
     let patch = PatchFile::parse(text).unwrap();
-    assert_eq!((patch.cast.as_str(), patch.member, patch.member_name.as_str(), patch.handler.as_str()), ("Scripts", 27, "INVENTORY SORT", "LoadInf"));
+    assert_eq!((patch.cast.as_str(), patch.member, patch.member_name.as_str(), patch.handler.as_str()), ("Main", 5, "Game Logic", "DrawScene"));
     assert_eq!(patch.stock.as_deref(), Some("abc123"));
     assert!(!patch.enabled);
     assert_eq!(patch.why, "Shows the eyepatch. It is a head piece.");
-    assert_eq!(patch.id(), "Scripts/27/LoadInf");
+    assert_eq!(patch.id(), "Main/5/DrawScene");
     // A cast name may contain a slash-free space; the member number is what follows the last slash.
-    assert_eq!(PatchFile::parse(&text.replace("Scripts/27", "Hireling Draw/3")).unwrap().cast, "Hireling Draw");
-    assert!(PatchFile::parse("on LoadInf\nend\n").unwrap_err().contains("lingo-patch"));
+    assert_eq!(PatchFile::parse(&text.replace("Main/5", "Hireling Draw/3")).unwrap().cast, "Hireling Draw");
+    assert!(PatchFile::parse("on DrawScene\nend\n").unwrap_err().contains("lingo-patch"));
     assert!(PatchFile::parse(&text.replace("-- why: Shows the eyepatch.\n--   It is a head piece.\n", "")).unwrap_err().contains("why"));
     assert!(PatchFile::parse(&text.replace("-- stock: abc123\n", "")).unwrap_err().contains("stock"));
     assert!(PatchFile::parse(&text.replace("-- stock: abc123\n", "-- new: yes\n")).unwrap().new_handler);
@@ -379,12 +379,15 @@ fn patch_file_of_edits() {
 #[test]
 fn secrets_rule() {
     assert_eq!(redact_strings("x = foo(\"abc\", 5) & \"d\"\ny = \"e\"\n"), "x = foo(\"<redacted>\", 5) & \"<redacted>\"\ny = \"<redacted>\"\n");
+    // Which names are connection code is the game's to say; with no config, none is.
+    assert!(static_secret_problems("x = baDecryptText(a, b)").is_empty());
+    set_tool_config(ToolConfig::parse(r#"{"connectionCode": {"nameContains": ["Crypt"], "names": ["connectToNetServer"]}}"#).unwrap());
     assert!(static_secret_problems("x = baDecryptText(a, b)").len() == 1);
     assert!(static_secret_problems("gConnect.connectToNetServer(a, b)").len() == 1);
     assert!(static_secret_problems("x = EncryptCd").len() == 1);
     // In a comment or a string the words are harmless.
     assert!(static_secret_problems("-- not baDecryptText\nx = \"connectToNetServer\"").is_empty());
-    assert!(static_secret_problems("x = 1\nLoadInf(x)").is_empty());
+    assert!(static_secret_problems("x = 1\nDrawScene(x)").is_empty());
 }
 
 #[test]
@@ -455,6 +458,12 @@ fn replacing_a_handler_in_a_script() {
 // ---- on a real movie ----
 
 fn movie_path() -> Option<String> {
+    // The game's tool config, when the caller has one (ROTL_LINGO_CONFIG): which handlers are connection code.
+    if let Ok(config) = std::env::var("ROTL_LINGO_CONFIG") {
+        if let Ok(text) = std::fs::read_to_string(&config) {
+            set_tool_config(ToolConfig::parse(&text).unwrap());
+        }
+    }
     match std::env::var("ROTL_MOVIE") {
         Ok(path) if !path.is_empty() => Some(path),
         _ => {
@@ -498,10 +507,10 @@ fn every_handler_of_the_movie_recompiles_to_its_own_bytes() {
             }
         }
     }
-    eprintln!("{} handler(s) treated as connection code", sensitive);
+    eprintln!("{} handler(s) treated as connection code (by ROTL_LINGO_CONFIG, when set)", sensitive);
 }
 
-vm_rust::native_e2e_test!(a_replaced_handler_runs_in_the_player, |player| async move {
+vm_rust::native_e2e_test!(handlers_are_replaced_in_the_player, |player| async move {
     use vm_rust::player::lingo_patch;
     use vm_rust::player::reserve_player_mut;
     use vm_rust::player::symbols::symbol::Symbol;
@@ -510,75 +519,74 @@ vm_rust::native_e2e_test!(a_replaced_handler_runs_in_the_player, |player| async 
     let Some(path) = movie_path() else { return Ok(()) };
     let global = |name: &str| reserve_player_mut(|p| p.globals.get(&Symbol::from_str(name)).map(|r| p.get_datum(r).string_value().unwrap_or_default()).unwrap_or_else(|| "(none)".into()));
 
-    // The stock handler's source and fingerprint, from the file.
-    let (stock_source, print) = {
+    // Any movie will do: take the first movie script, and its first handler that is not connection code.
+    // Nothing here names a handler of one game; a game's own repository tests its own patches.
+    let (cast, member, handler, stock_source, print) = {
         let bytes = std::fs::read(&path).unwrap();
         let file = vm_rust::director::file::read_director_file_bytes(&bytes, "movie.dcr", "file:///").unwrap();
         let movie = vm_rust::director::lingo::compiler::movie::Movie::new(file);
-        let script = movie.find_script("Scripts", "INVENTORY SORT").unwrap();
-        let (_, handler) = movie.find_handler(script, "LoadInf").unwrap();
-        (movie.source(script, handler, true), movie.fingerprint(script, handler))
+        let mut found = None;
+        for script in movie.scripts.iter().filter(|s| s.kind == "movie" && s.member > 0) {
+            for (index, h) in movie.chunk(script).handlers.iter().enumerate() {
+                if !movie.handler_is_sensitive(script, h) && movie.round_trip(script, h).identical() {
+                    found = Some((script.cast.clone(), script.member, script.handlers[index].clone(), movie.source(script, h, true), movie.fingerprint(script, h)));
+                    break;
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        found.expect("the movie has a movie script with a handler")
     };
-    let end = stock_source.rfind("end\n").unwrap();
-    let patched_source = format!("{}  if StaticInf contains \"W-Eyepatch\" then\n    HeadImage = \"Eyepatch\"\n  end if\n{}", &stock_source[..end], &stock_source[end..]);
-    let manifest = |source: &str, stock: &str| serde_json::json!({ "version": 1, "patches": [
-        { "cast": "Scripts", "member": 27, "handler": "LoadInf", "stock": stock, "source": source },
-        { "cast": "Scripts", "member": 27, "handler": "LoadInf", "stock": "00ff", "source": source },
-        { "cast": "Scripts", "member": 27, "handler": "NoSuchHandler", "source": "on NoSuchHandler\nend" },
+    let added = "on LingoPatchTestAdded a\n  return a & \"!\"\nend";
+    let manifest = serde_json::json!({ "version": 1, "patches": [
+        { "cast": cast, "member": member, "handler": handler, "stock": print, "source": stock_source },
+        { "cast": cast, "member": member, "handler": handler, "stock": "00ff", "source": stock_source },
+        { "cast": cast, "member": member, "handler": "NoSuchHandlerHere", "source": "on NoSuchHandlerHere\nend" },
         { "cast": "No Such Cast", "member": 1, "handler": "x", "source": "on x\nend" },
-        { "cast": "Scripts", "member": 27, "handler": "LoadInfB", "source": "on LoadInfB\n  x = (\nend" },
-        { "cast": "Scripts", "member": 27, "handler": "RotlAddedHandler", "new": true, "source": "on RotlAddedHandler a\n  return a & \"!\"\nend" }
+        { "cast": cast, "member": member, "handler": handler, "source": format!("on {}\n  x = (\nend", handler) },
+        { "cast": cast, "member": member, "handler": "LingoPatchTestAdded", "new": true, "source": added }
     ] }).to_string();
 
     // Given before the movie is loaded, the manifest waits for it.
-    let waiting = reserve_player_mut(|p| lingo_patch::set_patches(p, &manifest(&patched_source, &print)));
+    let waiting = reserve_player_mut(|p| lingo_patch::set_patches(p, &manifest));
     assert_eq!(waiting.state, "pending");
     player.load_movie(&path).await;
     let status = lingo_patch::status();
     assert_eq!(status.state, "applied");
-    let by_handler = |name: &str, nth: usize| status.results.iter().filter(|r| r.handler == name).nth(nth).unwrap().clone();
-    assert!(by_handler("LoadInf", 0).ok && !by_handler("LoadInf", 0).late, "{:?}", by_handler("LoadInf", 0));
-    assert_eq!(by_handler("LoadInf", 1).refused.as_deref(), Some("movie-changed"));
-    assert_eq!(by_handler("NoSuchHandler", 0).refused.as_deref(), Some("not-found"));
-    assert_eq!(by_handler("x", 0).refused.as_deref(), Some("not-found"));
-    assert_eq!(by_handler("LoadInfB", 0).refused.as_deref(), Some("compile"));
-    assert!(by_handler("LoadInfB", 0).error.unwrap().contains("line 2"));
-    assert!(by_handler("RotlAddedHandler", 0).ok);
+    let r = &status.results;
+    assert!(r[0].ok && !r[0].late, "{:?}", r[0]);
+    assert_eq!(r[0].bytes, r[0].stock_bytes, "the stock source compiles to the stock size");
+    assert_eq!(r[1].refused.as_deref(), Some("movie-changed"));
+    assert_eq!(r[2].refused.as_deref(), Some("not-found"));
+    assert_eq!(r[3].refused.as_deref(), Some("not-found"));
+    assert_eq!(r[4].refused.as_deref(), Some("compile"));
+    assert!(r[4].error.clone().unwrap().contains("line 2"));
+    assert!(r[5].ok);
     assert_eq!((status.applied, status.refused), (2, 4));
 
-    for line in ["MyCharsBody = \"DefChar\"", "MyHead = \"Head1\"", "CurInvList = 1", "mname = \"Tester\"", "MyChar = \"Tester\"", "bFileDat = \"X\""] {
-        let _ = player.eval(line).await;
-    }
-    let run = |inf: &'static str| format!("TheInf = \"{}\"\nLoadInf(TheInf)", inf);
-    player.eval(&run("W-Red Shirt:W-Eyepatch:Apple")).await.map_err(|e| e.message)?;
-    assert_eq!(global("HeadImage"), "Eyepatch", "the replaced handler ran");
-    assert_eq!(global("Shirt"), "Red Shirt", "the rest of the handler still does its work");
-    player.eval(&run("W-Red Shirt:Apple")).await.map_err(|e| e.message)?;
-    assert_eq!(global("HeadImage"), "Head1");
     // The added handler is callable like one of the movie's own.
-    player.eval("RotlTestOut = RotlAddedHandler(\"hi\")").await.map_err(|e| e.message)?;
-    assert_eq!(global("RotlTestOut"), "hi!");
+    player.eval("LingoPatchTestOut = LingoPatchTestAdded(\"hi\")").await.map_err(|e| e.message)?;
+    assert_eq!(global("LingoPatchTestOut"), "hi!");
 
-    // Clearing puts the movie's own handler back.
+    // Clearing takes it away again.
     let cleared = reserve_player_mut(|p| lingo_patch::clear_patches(p));
     assert_eq!(cleared.state, "none");
-    player.eval(&run("W-Red Shirt:W-Eyepatch:Apple")).await.map_err(|e| e.message)?;
-    assert_eq!(global("HeadImage"), "Head1", "stock behaviour after clearing");
-    assert!(player.eval("RotlTestOut = RotlAddedHandler(\"hi\")").await.is_err(), "the added handler is gone");
+    assert!(player.eval("LingoPatchTestOut = LingoPatchTestAdded(\"hi\")").await.is_err(), "the added handler is gone");
 
     // Given after the movie is loaded, a manifest is applied at once and says so.
-    let late = reserve_player_mut(|p| lingo_patch::set_patches(p, &manifest(&patched_source, &print)));
+    let late = reserve_player_mut(|p| lingo_patch::set_patches(p, &manifest));
     assert!(late.results[0].ok && late.results[0].late);
-    player.eval(&run("W-Red Shirt:W-Eyepatch:Apple")).await.map_err(|e| e.message)?;
-    assert_eq!(global("HeadImage"), "Eyepatch");
+    player.eval("LingoPatchTestOut = LingoPatchTestAdded(\"again\")").await.map_err(|e| e.message)?;
+    assert_eq!(global("LingoPatchTestOut"), "again!");
 
     // A manifest this player does not understand changes nothing and says why.
     let bad = reserve_player_mut(|p| lingo_patch::set_patches(p, "{\"version\": 99, \"patches\": []}"));
     assert!(bad.error.unwrap().contains("version 99"));
     let bad = reserve_player_mut(|p| lingo_patch::set_patches(p, "not json"));
     assert!(bad.error.unwrap().contains("not valid JSON"));
-    player.eval(&run("W-Red Shirt:W-Eyepatch:Apple")).await.map_err(|e| e.message)?;
-    assert_eq!(global("HeadImage"), "Head1", "a bad manifest leaves the stock movie");
+    assert!(player.eval("LingoPatchTestOut = LingoPatchTestAdded(\"x\")").await.is_err(), "a bad manifest leaves the stock movie");
     reserve_player_mut(|p| lingo_patch::clear_patches(p));
     Ok(())
 });

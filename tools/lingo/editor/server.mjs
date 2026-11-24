@@ -8,7 +8,7 @@
 //                                      [--port 19575] [--rig http://127.0.0.1:19572]
 //
 // Each option can also come from the environment: ROTL_LINGO_TOOL, ROTL_LINGO_MOVIE, ROTL_LINGO_PATCHES,
-// ROTL_LINGO_EDITOR_PORT, ROTL_LINGO_RIG.
+// ROTL_LINGO_EDITOR_PORT, ROTL_LINGO_RIG, and ROTL_LINGO_CONFIG for --config (the game's tool config).
 
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
@@ -55,14 +55,15 @@ export function readConfig(argv, env) {
     patches: env.ROTL_LINGO_PATCHES || '',
     port: env.ROTL_LINGO_EDITOR_PORT || String(DEFAULT_PORT),
     rig: env.ROTL_LINGO_RIG || '',
+    toolConfig: env.ROTL_LINGO_CONFIG || '',
   };
   for (let i = 0; i < argv.length; i++) {
     const name = argv[i];
-    if (!['--tool', '--movie', '--patches', '--port', '--rig'].includes(name)) {
+    if (!['--tool', '--movie', '--patches', '--port', '--rig', '--config'].includes(name)) {
       throw new Error(`unknown option ${name}`);
     }
     if (i + 1 >= argv.length) throw new Error(`${name} needs a value`);
-    config[name.slice(2)] = argv[++i];
+    config[name === '--config' ? 'toolConfig' : name.slice(2)] = argv[++i];
   }
   return config;
 }
@@ -79,6 +80,10 @@ export function checkConfig(config) {
   if (!isFile(out.movie)) throw new Error(`the movie ${out.movie} does not exist`);
   const patches = path.resolve(config.patches);
   if (!isDirectory(patches)) throw new Error(`the patch directory ${patches} does not exist`);
+  // The game's list of connection-code names. Without it the tool would have nothing to hide.
+  if (!config.toolConfig) throw new Error('no tool config: pass --config <file> or set ROTL_LINGO_CONFIG');
+  out.toolConfig = path.resolve(config.toolConfig);
+  if (!isFile(out.toolConfig)) throw new Error(`the tool config ${out.toolConfig} does not exist`);
   // The real path, so that every later "is it inside?" test compares like with like.
   out.patches = fs.realpathSync(patches);
   out.port = Number(config.port ?? DEFAULT_PORT);
@@ -236,7 +241,7 @@ export function createApp(rawConfig) {
       () =>
         new Promise((resolve) => {
           // An argument array and no shell: nothing in a request is ever interpreted as a command.
-          execFile(config.tool, [...args, '--movie', config.movie], { timeout, killSignal: 'SIGKILL', maxBuffer: MAX_TOOL_OUTPUT, windowsHide: true }, (error, stdout, stderr) => {
+          execFile(config.tool, [...args, '--movie', config.movie], { timeout, killSignal: 'SIGKILL', maxBuffer: MAX_TOOL_OUTPUT, windowsHide: true, env: { ...process.env, ...(config.toolConfig ? { ROTL_LINGO_CONFIG: config.toolConfig } : {}) } }, (error, stdout, stderr) => {
             const timedOut = Boolean(error && error.killed);
             const code = error ? (typeof error.code === 'number' ? error.code : -1) : 0;
             resolve({ code, stdout: String(stdout), stderr: String(stderr), timedOut, spawnError: error && typeof error.code === 'string' ? error.code : '' });

@@ -32,12 +32,78 @@ pub struct Movie {
     pub scripts: Vec<ScriptInfo>,
 }
 
-/// A handler is sensitive when it deals with the connection: it calls the Multiuser connect, or uses
-/// anything with "crypt" in its name. Its string literals may be keys or addresses, so tools never show them
-/// and never accept a patch for it.
+/// What a game tells the tools about its movie. Nothing about any one game is built in: the game's
+/// repository keeps this as a JSON file and hands it to every tool (`--config`, `ROTL_LINGO_CONFIG`).
+///
+/// ```json
+/// {
+///   "connectionCode": { "nameContains": ["crypt"], "names": ["connectToNetServer"] },
+///   "offlineConnection": { "global": "gConnect", "handlers": ["sendNetMessage"] }
+/// }
+/// ```
+///
+/// `connectionCode`: a handler that uses one of these names (calls it, reads or writes it, or is called
+/// it) is sensitive. Its string literals may be keys or addresses, so no tool shows them and no tool
+/// accepts a patch for it or a patch that uses those names.
+///
+/// `offlineConnection`: for `run --offline`, the global that holds the movie's server connection and
+/// the handlers a stand-in for it answers, so that handlers which send a message run without a server.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct ToolConfig {
+    #[serde(default, rename = "connectionCode")]
+    pub connection_code: ConnectionCode,
+    #[serde(default, rename = "offlineConnection")]
+    pub offline_connection: Option<OfflineConnection>,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct ConnectionCode {
+    #[serde(default, rename = "nameContains")]
+    pub name_contains: Vec<String>,
+    #[serde(default)]
+    pub names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct OfflineConnection {
+    pub global: String,
+    #[serde(default)]
+    pub handlers: Vec<String>,
+}
+
+impl ToolConfig {
+    pub fn parse(text: &str) -> Result<ToolConfig, String> {
+        let mut config: ToolConfig = serde_json::from_str(text).map_err(|e| format!("the tool config is not valid: {}", e))?;
+        for list in [&mut config.connection_code.name_contains, &mut config.connection_code.names] {
+            for name in list.iter_mut() {
+                *name = name.to_ascii_lowercase();
+            }
+            list.retain(|n| !n.is_empty());
+        }
+        Ok(config)
+    }
+}
+
+thread_local! {
+    static CONFIG: std::cell::RefCell<ToolConfig> = std::cell::RefCell::new(ToolConfig::default());
+}
+
+/// Sets the game's config for this thread's tools. Without one, no name is sensitive.
+pub fn set_tool_config(config: ToolConfig) {
+    CONFIG.with(|c| *c.borrow_mut() = config);
+}
+
+pub fn tool_config() -> ToolConfig {
+    CONFIG.with(|c| c.borrow().clone())
+}
+
+/// Whether a name belongs to the connection code, by the game's config.
 pub fn name_is_sensitive(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower.contains("crypt") || lower == "connecttonetserver"
+    CONFIG.with(|c| {
+        let c = c.borrow();
+        c.connection_code.name_contains.iter().any(|part| lower.contains(part.as_str())) || c.connection_code.names.iter().any(|n| *n == lower)
+    })
 }
 
 pub const REDACTED: &str = "<redacted>";
@@ -258,12 +324,12 @@ pub fn string_literals(source: &str) -> Vec<String> {
 ///
 /// ```text
 /// -- lingo-patch 1
-/// -- script: Scripts/27 (INVENTORY SORT)
-/// -- handler: LoadInf
+/// -- script: Main/5 (Game Logic)
+/// -- handler: DrawScene
 /// -- stock: 5f0c...            (fingerprint of the handler being replaced; `rotl-lingo new` writes it)
 /// -- enabled: yes              (`no` keeps the file out of the manifest)
 /// -- why: one or more lines saying what this changes and why
-/// on LoadInf TheInf
+/// on DrawScene TheInf
 ///   ...
 /// end
 /// ```

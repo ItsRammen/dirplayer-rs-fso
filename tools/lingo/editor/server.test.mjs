@@ -40,12 +40,12 @@ const report = (file, text) => {
   if (/BADNAME/.test(text)) problems.push('the patch uses \`badname\`, which belongs to the connection code; patches must stay away from it');
   if (!has('--static') && /CONNSTRING/.test(text)) problems.push('the file contains a string that the movie\\'s connection code uses; it must not be copied into a patch');
   if (!has('--static') && /SYNTAXERR/.test(text)) problems.push('line 3: expected end');
-  return { file, ok: problems.length === 0, problems, warnings: [], id: 'Scripts/27/LoadInf', enabled: false };
+  return { file, ok: problems.length === 0, problems, warnings: [], id: 'Scripts/27/DrawScene', enabled: false };
 };
 if (command === 'list') {
-  say({ scripts: [{ cast: 'Scripts', member: 27, name: 'INVENTORY SORT', kind: 'movie', ref: 'Scripts/27', handlers: [{ name: 'LoadInf', args: ['TheInf'], bytes: 10, sensitive: false }, { name: 'Secret', args: [], bytes: 5, sensitive: true }] }], scriptCount: 1, handlerCount: 2 });
+  say({ scripts: [{ cast: 'Scripts', member: 27, name: 'Game Logic', kind: 'movie', ref: 'Scripts/27', handlers: [{ name: 'DrawScene', args: ['TheInf'], bytes: 10, sensitive: false }, { name: 'Secret', args: [], bytes: 5, sensitive: true }] }], scriptCount: 1, handlerCount: 2 });
 } else if (command === 'show') {
-  say({ ref: positional[0], source: 'on LoadInf\\nend\\n', sensitive: false, editable: true, bytecode: [] });
+  say({ ref: positional[0], source: 'on DrawScene\\nend\\n', sensitive: false, editable: true, bytecode: [] });
 } else if (command === 'search') {
   say({ query: positional[0], total: 0, shown: 0, hits: [] });
 } else if (command === 'check') {
@@ -62,11 +62,11 @@ if (command === 'list') {
   process.exit(r.ok ? 0 : 1);
 } else if (command === 'manifest') {
   console.error('1 patch(es) in the manifest, 0 not enabled');
-  say({ version: 1, patches: [{ id: 'Scripts/27/LoadInf', source: fs.readFileSync(positional[0], 'utf8') }] });
+  say({ version: 1, patches: [{ id: 'Scripts/27/DrawScene', source: fs.readFileSync(positional[0], 'utf8') }] });
 } else if (command === 'new') {
   const out = args[args.indexOf('-o') + 1];
   if (fs.existsSync(out)) { console.error('rotl-lingo: already exists'); process.exit(1); }
-  fs.writeFileSync(out, '-- lingo-patch 1\\n-- why: ' + args[args.indexOf('--why') + 1] + '\\non LoadInf\\nend\\n');
+  fs.writeFileSync(out, '-- lingo-patch 1\\n-- why: ' + args[args.indexOf('--why') + 1] + '\\non DrawScene\\nend\\n');
   say({ ok: true, file: out, ref: positional[0] });
 } else if (command === 'run') {
   console.log('[test] noise');
@@ -95,7 +95,7 @@ before(() => {
   toolLog = path.join(work, 'tool.log');
   fs.writeFileSync(toolLog, '');
   process.env.FAKE_TOOL_LOG = toolLog;
-  app = createApp({ tool: path.join(work, 'fake-rotl-lingo'), movie: path.join(work, 'movie.dcr'), patches, port: PORT, rig: RIG });
+  app = createApp({ tool: path.join(work, 'fake-rotl-lingo'), movie: path.join(work, 'movie.dcr'), patches, port: PORT, rig: RIG, toolConfig: path.join(work, 'movie.dcr') });
 });
 
 after(() => {
@@ -145,12 +145,13 @@ function toolCalls() {
   return fs.readFileSync(toolLog, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
 }
 
-const GOOD_TEXT = '-- lingo-patch 1\n-- why: test\non LoadInf\nend\n';
+const GOOD_TEXT = '-- lingo-patch 1\n-- why: test\non DrawScene\nend\n';
 
 // ---------------------------------------------------------------------------------------------------
 
 test('start-up refuses a missing tool, movie or patch directory with a clear message', () => {
-  const good = { tool: path.join(work, 'fake-rotl-lingo'), movie: path.join(work, 'movie.dcr'), patches, port: PORT };
+  const good = { tool: path.join(work, 'fake-rotl-lingo'), movie: path.join(work, 'movie.dcr'), patches, port: PORT, toolConfig: path.join(work, 'movie.dcr') };
+  assert.throws(() => checkConfig({ ...good, toolConfig: '' }), /no tool config/);
   assert.throws(() => checkConfig({ ...good, tool: '' }), /no tool/);
   assert.throws(() => checkConfig({ ...good, tool: path.join(work, 'nope') }), /does not exist/);
   assert.throws(() => checkConfig({ ...good, movie: path.join(work, 'nope.dcr') }), /movie .* does not exist/);
@@ -161,7 +162,7 @@ test('start-up refuses a missing tool, movie or patch directory with a clear mes
 
 test('options come from the command line over the environment', () => {
   const config = readConfig(['--port', '19576', '--tool', '/t'], { ROTL_LINGO_TOOL: '/env-tool', ROTL_LINGO_MOVIE: '/m', ROTL_LINGO_EDITOR_PORT: '19570', ROTL_LINGO_RIG: 'http://r' });
-  assert.deepEqual(config, { tool: '/t', movie: '/m', patches: '', port: '19576', rig: 'http://r' });
+  assert.deepEqual(config, { tool: '/t', movie: '/m', patches: '', port: '19576', rig: 'http://r', toolConfig: '' });
   assert.throws(() => readConfig(['--shell', 'x'], {}), /unknown option/);
 });
 
@@ -211,15 +212,15 @@ test('compile reads the last JSON line, hides the temp file and leaves no temp f
 });
 
 test('save: a normal save lands in the patch directory and shows git commands', async () => {
-  const res = await post('/api/save', { file: 'Scripts.27-INVENTORY_SORT/LoadInf.ls', text: GOOD_TEXT });
+  const res = await post('/api/save', { file: 'Scripts.27-Game_Logic/DrawScene.ls', text: GOOD_TEXT });
   assert.equal(res.status, 200, res.text);
-  const full = path.join(fs.realpathSync(patches), 'Scripts.27-INVENTORY_SORT', 'LoadInf.ls');
+  const full = path.join(fs.realpathSync(patches), 'Scripts.27-Game_Logic', 'DrawScene.ls');
   assert.equal(res.json.path, full);
   assert.equal(fs.readFileSync(full, 'utf8'), GOOD_TEXT);
-  assert.match(res.json.git[0], /^git -C \S+ add -- Scripts\.27-INVENTORY_SORT\/LoadInf\.ls$/);
+  assert.match(res.json.git[0], /^git -C \S+ add -- Scripts\.27-Game_Logic\/DrawScene\.ls$/);
   assert.match(res.json.git[1], /^git -C \S+ commit -m /);
   // Saving again overwrites the same patch file.
-  const again = await post('/api/save', { file: 'Scripts.27-INVENTORY_SORT/LoadInf.ls', text: GOOD_TEXT + '-- more\n' });
+  const again = await post('/api/save', { file: 'Scripts.27-Game_Logic/DrawScene.ls', text: GOOD_TEXT + '-- more\n' });
   assert.equal(again.status, 200);
   assert.equal(fs.readFileSync(full, 'utf8'), GOOD_TEXT + '-- more\n');
   // The static check ran on the text before each write.
@@ -282,8 +283,8 @@ test('save: symbolic links are refused, whether a file or a directory on the way
 });
 
 test('resolvePatchPath accepts the normal layout', () => {
-  const file = patchFileFor('Scripts', 27, 'Obj Outlining + item swap', 'LoadInf');
-  assert.equal(file, 'Scripts.27-Obj_Outlining_item_swap/LoadInf.ls');
+  const file = patchFileFor('Scripts', 27, 'Obj Outlining + item swap', 'DrawScene');
+  assert.equal(file, 'Scripts.27-Obj_Outlining_item_swap/DrawScene.ls');
   assert.equal(resolvePatchPath(patches, file), path.join(fs.realpathSync(patches), file));
   assert.equal(patchFileFor('Internal', 16, '', 'exitFrame'), 'Internal.16/exitFrame.ls');
   assert.equal(patchFileFor('../x', 1, '../../etc', '..'), 'x.1-etc/handler.ls');
@@ -298,9 +299,9 @@ test('save: the static check blocks connection code and nothing is written', asy
   assert.equal(fs.existsSync(path.join(patches, 'blocked')), false);
 
   // An existing file is not overwritten by refused text either.
-  const kept = path.join(patches, 'Scripts.27-INVENTORY_SORT', 'LoadInf.ls');
+  const kept = path.join(patches, 'Scripts.27-Game_Logic', 'DrawScene.ls');
   const before = fs.readFileSync(kept, 'utf8');
-  const second = await post('/api/save', { file: 'Scripts.27-INVENTORY_SORT/LoadInf.ls', text: 'BADNAME' });
+  const second = await post('/api/save', { file: 'Scripts.27-Game_Logic/DrawScene.ls', text: 'BADNAME' });
   assert.equal(second.status, 422);
   assert.equal(fs.readFileSync(kept, 'utf8'), before);
   assert.deepEqual(fs.readdirSync(app.tempDir), []);
@@ -318,20 +319,20 @@ test('save: a connection finding from the check against the movie blocks too; a 
 });
 
 test('new: creates the file through the tool, refuses connection handlers and existing files', async () => {
-  const made = await post('/api/new', { ref: 'Scripts/27/loadinf', why: 'because\n  of this' });
+  const made = await post('/api/new', { ref: 'Scripts/27/drawscene', why: 'because\n  of this' });
   assert.equal(made.status, 409, 'the earlier save made this file already');
-  fs.rmSync(path.join(patches, 'Scripts.27-INVENTORY_SORT'), { recursive: true });
-  const fresh = await post('/api/new', { ref: 'Scripts/27/loadinf', why: 'because\n  of this' });
+  fs.rmSync(path.join(patches, 'Scripts.27-Game_Logic'), { recursive: true });
+  const fresh = await post('/api/new', { ref: 'Scripts/27/drawscene', why: 'because\n  of this' });
   assert.equal(fresh.status, 200, fresh.text);
-  assert.equal(fresh.json.file, 'Scripts.27-INVENTORY_SORT/LoadInf.ls');
+  assert.equal(fresh.json.file, 'Scripts.27-Game_Logic/DrawScene.ls');
   assert.match(fresh.json.text, /-- why: because of this\n/);
   const call_ = toolCalls().filter((c) => c[0] === 'new').at(-1);
-  assert.equal(call_[call_.indexOf('-o') + 1], path.join(fs.realpathSync(patches), 'Scripts.27-INVENTORY_SORT', 'LoadInf.ls'));
+  assert.equal(call_[call_.indexOf('-o') + 1], path.join(fs.realpathSync(patches), 'Scripts.27-Game_Logic', 'DrawScene.ls'));
 
   assert.equal((await post('/api/new', { ref: 'Scripts/27/Secret', why: 'x' })).status, 403);
   assert.equal((await post('/api/new', { ref: 'Scripts/27/Nope', why: 'x' })).status, 404);
-  assert.equal((await post('/api/new', { ref: 'Scripts/27/LoadInf', why: '  ' })).status, 400);
-  assert.equal((await post('/api/new', { ref: '--json/27/LoadInf', why: 'x' })).status, 400);
+  assert.equal((await post('/api/new', { ref: 'Scripts/27/DrawScene', why: '  ' })).status, 400);
+  assert.equal((await post('/api/new', { ref: '--json/27/DrawScene', why: 'x' })).status, 400);
 });
 
 test('positional arguments that look like options never reach the tool', async () => {
@@ -361,7 +362,7 @@ test('run: passes evals and globals as separate arguments and reads the JSON aft
 });
 
 test('rig manifest: allows exactly the configured rig origin', async () => {
-  const file = 'Scripts.27-INVENTORY_SORT/LoadInf.ls';
+  const file = 'Scripts.27-Game_Logic/DrawScene.ls';
   const res = await call({ url: `/rig/manifest.json?file=${encodeURIComponent(file)}`, headers: { Origin: RIG } });
   assert.equal(res.status, 200, res.text);
   assert.equal(res.headers['access-control-allow-origin'], RIG);
@@ -384,7 +385,7 @@ test('rig manifest: allows exactly the configured rig origin', async () => {
 });
 
 test('rig manifest: absent when no rig is configured', async () => {
-  const plain = createApp({ tool: path.join(work, 'fake-rotl-lingo'), movie: path.join(work, 'movie.dcr'), patches, port: PORT });
+  const plain = createApp({ tool: path.join(work, 'fake-rotl-lingo'), movie: path.join(work, 'movie.dcr'), patches, port: PORT, toolConfig: path.join(work, 'movie.dcr') });
   try {
     const req = Readable.from([]);
     Object.assign(req, { method: 'GET', url: '/rig/manifest.json?file=a.ls', headers: { host: `127.0.0.1:${PORT}` } });
@@ -429,7 +430,7 @@ test('one tool process at a time, and the script list is read once', async () =>
     call({ url: '/api/patches' }),
     post('/api/compile', { text: GOOD_TEXT }),
     post('/api/save', { file: 'queue/one.ls', text: GOOD_TEXT }),
-    call({ url: '/api/handler?ref=Scripts/27/LoadInf' }),
+    call({ url: '/api/handler?ref=Scripts/27/DrawScene' }),
   ]);
   for (const res of answers) assert.equal(res.status, 200, res.text);
   assert.equal(fs.existsSync(toolLog + '.overlap'), false, 'two tool processes ran at the same time');

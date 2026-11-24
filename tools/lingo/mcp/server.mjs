@@ -13,11 +13,12 @@
 //
 // Configuration, by environment:
 //   ROTL_LINGO_TOOL     the rotl-lingo binary
-//   ROTL_LINGO_MOVIE    the movie file (a copy of dcrgame.dcr)
-//   ROTL_LINGO_PATCHES  the patch directory (client/lingo/patches in NodeJS-ROTL)
+//   ROTL_LINGO_MOVIE    the movie file
+//   ROTL_LINGO_CONFIG   the game's tool config (JSON): which names are connection code, what `run --offline` stands in for
+//   ROTL_LINGO_PATCHES  the patch directory (the game repository's patch folder)
 //
-// Register with Claude Code (see docs/lingo-compiler.md in NodeJS-ROTL):
-//   claude mcp add rotl-lingo -e ROTL_LINGO_TOOL=... -e ROTL_LINGO_MOVIE=... -e ROTL_LINGO_PATCHES=... \
+// Register with Claude Code:
+//   claude mcp add rotl-lingo -e ROTL_LINGO_TOOL=... -e ROTL_LINGO_MOVIE=... -e ROTL_LINGO_CONFIG=... -e ROTL_LINGO_PATCHES=... \
 //     -- node /path/to/dirplayer-rs-fso/tools/lingo/mcp/server.mjs
 //
 // The protocol is JSON-RPC 2.0 over stdin/stdout, one message a line. No dependencies.
@@ -34,10 +35,12 @@ const MAX_TEXT = 512 * 1024;
 const MAX_OUTPUT = 60_000;
 
 export function loadConfig(env = process.env) {
-  const config = { tool: env.ROTL_LINGO_TOOL || '', movie: env.ROTL_LINGO_MOVIE || '', patches: env.ROTL_LINGO_PATCHES || '' };
+  const config = { tool: env.ROTL_LINGO_TOOL || '', movie: env.ROTL_LINGO_MOVIE || '', patches: env.ROTL_LINGO_PATCHES || '', toolConfig: env.ROTL_LINGO_CONFIG || '' };
   const problems = [];
   if (!config.tool || !fs.existsSync(config.tool)) problems.push('ROTL_LINGO_TOOL is not set to the rotl-lingo binary');
   if (!config.movie || !fs.existsSync(config.movie)) problems.push('ROTL_LINGO_MOVIE is not set to the movie file');
+  // Without the game's config the tool would have nothing to hide, so the server does not start its work without one.
+  if (!config.toolConfig || !fs.existsSync(config.toolConfig)) problems.push('ROTL_LINGO_CONFIG is not set to the game\'s tool config');
   if (!config.patches || !fs.existsSync(config.patches) || !fs.statSync(config.patches).isDirectory()) problems.push('ROTL_LINGO_PATCHES is not set to the patch directory');
   return { config, problems };
 }
@@ -49,7 +52,7 @@ let queue = Promise.resolve();
 
 function runTool(config, args, { timeout = 60_000 } = {}) {
   const job = queue.then(() => new Promise((resolve) => {
-    execFile(config.tool, args, { timeout, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, ROTL_LINGO_MOVIE: config.movie } }, (error, stdout, stderr) => {
+    execFile(config.tool, args, { timeout, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, ROTL_LINGO_MOVIE: config.movie, ROTL_LINGO_CONFIG: config.toolConfig || '' } }, (error, stdout, stderr) => {
       resolve({ code: error ? (typeof error.code === 'number' ? error.code : 1) : 0, stdout: String(stdout), stderr: String(stderr), killed: !!(error && error.killed) });
     });
   }));
@@ -82,7 +85,7 @@ async function toolJson(config, args, options) {
 
 const SAFE_NAME = /^[A-Za-z0-9 ._-]+$/;
 
-/** A patch file's path inside the patch directory, or an error. `relative` is like `Scripts.27-INVENTORY SORT/LoadInf.ls`. */
+/** A patch file's path inside the patch directory, or an error. `relative` is like `Main.5-Game Logic/DrawScene.ls`. */
 export function patchPath(config, relative, { mustExist = false } = {}) {
   if (typeof relative !== 'string' || !relative) throw new Error('file: give the patch file\'s path inside the patch directory');
   if (path.isAbsolute(relative) || relative.includes('\\')) throw new Error('file: a path inside the patch directory, not an absolute one');
@@ -101,7 +104,7 @@ export function patchPath(config, relative, { mustExist = false } = {}) {
   return full;
 }
 
-/** `Scripts`, 27, `INVENTORY SORT`, `LoadInf` -> `Scripts.27-INVENTORY SORT/LoadInf.ls` */
+/** `Main`, 5, `Game Logic`, `DrawScene` -> `Main.5-Game Logic/DrawScene.ls` */
 export function defaultPatchFile(cast, member, scriptName, handler) {
   const clean = (s) => String(s).replace(/[^A-Za-z0-9 ._-]+/g, '_').trim();
   const folder = scriptName ? `${clean(cast)}.${member}-${clean(scriptName)}` : `${clean(cast)}.${member}`;
@@ -140,13 +143,13 @@ const str = (description) => ({ type: 'string', description });
 export const TOOLS = [
   {
     name: 'lingo_list_scripts',
-    description: 'List the movie\'s scripts and their handlers. Each script has a ref like "Scripts/27" (cast library / member number); a handler\'s ref adds its name: "Scripts/27/LoadInf". Give `cast` or `filter` to narrow the list; without them only a count per cast comes back, since the movie has about 750 scripts.',
+    description: 'List the movie\'s scripts and their handlers. Each script has a ref like "Main/5" (cast library / member number); a handler\'s ref adds its name: "Main/5/DrawScene". Give `cast` or `filter` to narrow the list; without them only a count per cast comes back, since the movie has about 750 scripts.',
     inputSchema: { type: 'object', properties: { cast: str('Only this cast library, e.g. "Scripts"'), filter: str('Only scripts whose name or a handler name contains this text') } },
   },
   {
     name: 'lingo_get_handler',
     description: 'A handler\'s decompiled Lingo source, as the compiler reads it back, with its fingerprint (`stock`), whether it can be patched (`editable`), and the script\'s globals and properties. `bytecode: true` adds the instruction listing. Handlers that deal with the server connection come back with every string replaced by "<redacted>" and cannot be patched.',
-    inputSchema: { type: 'object', properties: { ref: str('"<cast>/<member>/<handler>", e.g. "Scripts/27/LoadInf". <member> is the member number, or the script\'s name when unique in its cast.'), bytecode: { type: 'boolean' } }, required: ['ref'] },
+    inputSchema: { type: 'object', properties: { ref: str('"<cast>/<member>/<handler>", e.g. "Main/5/DrawScene". <member> is the member number, or the script\'s name when unique in its cast.'), bytecode: { type: 'boolean' } }, required: ['ref'] },
   },
   {
     name: 'lingo_search',
@@ -201,7 +204,7 @@ export const TOOLS = [
 
 function splitRef(ref) {
   const parts = String(ref || '').split('/');
-  if (parts.length !== 3 || parts.some((p) => !p)) throw new Error('ref: "<cast>/<member>/<handler>", e.g. "Scripts/27/LoadInf"');
+  if (parts.length !== 3 || parts.some((p) => !p)) throw new Error('ref: "<cast>/<member>/<handler>", e.g. "Main/5/DrawScene"');
   return parts;
 }
 
@@ -319,7 +322,7 @@ export async function handleMessage(config, problems, message) {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: { tools: {} },
       serverInfo: { name: 'rotl-lingo', version: '1.0.0' },
-      instructions: 'Read and patch the Lingo of the ROTL movie. The movie is read-only; the only files written are .ls patch files in the patch directory. A patch replaces one handler: lingo_get_handler, lingo_new_patch, edit, lingo_write_patch, lingo_check_patch, lingo_run. Patches are not shipped from here.',
+      instructions: 'Read and patch the Lingo of the movie. The movie is read-only; the only files written are .ls patch files in the patch directory. A patch replaces one handler: lingo_get_handler, lingo_new_patch, edit, lingo_write_patch, lingo_check_patch, lingo_run. Patches are not shipped from here.',
     });
   }
   if (method === 'ping') return reply({});
