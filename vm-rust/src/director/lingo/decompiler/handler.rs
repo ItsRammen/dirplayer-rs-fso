@@ -11,6 +11,7 @@ use crate::director::chunks::script::ScriptChunk;
 use crate::director::lingo::opcode::OpCode;
 use crate::director::lingo::script::ScriptContext;
 use super::ast::*;
+use crate::director::lingo::compiler::tables;
 use super::enums::*;
 use super::code_writer::CodeWriter;
 use super::tokenizer::{tokenize_line, Span};
@@ -533,8 +534,13 @@ impl<'a> DecompilerState<'a> {
                                     // We need to find the case statement in the current block's children
                                     let children = self.current_block.borrow().children.clone();
                                     for child in children.iter().rev() {
-                                        if let AstNode::Case { otherwise, potential_otherwise_pos, .. } = child.node.as_ref() {
+                                        if let AstNode::Case { otherwise, potential_otherwise_pos, end_pos, .. } = child.node.as_ref() {
                                             let ow = Rc::new(RefCell::new(OtherwiseNode::new()));
+                                            // The `otherwise` block ends where the case ends. Without this it
+                                            // swallowed every statement after `end case`.
+                                            if end_pos.get() >= 0 {
+                                                ow.borrow().block.borrow_mut().end_pos = end_pos.get() as u32;
+                                            }
                                             otherwise.borrow_mut().replace(ow.clone());
                                             // Tag the otherwise position
                                             let ow_pos = potential_otherwise_pos.get();
@@ -1028,9 +1034,9 @@ impl<'a> DecompilerState<'a> {
                         }
                         BlockContext::CaseLabel => {
                             // Case statement jmp - find ancestor case to set end position
-                            // The case statement is in the grandparent block (block_stack[-2])
-                            if self.block_stack.len() >= 2 {
-                                let grandparent = &self.block_stack[self.block_stack.len() - 2];
+                            // The case statement is a child of the block this label's block was entered
+                            // from, which is the top of the block stack.
+                            if let Some(grandparent) = self.block_stack.last() {
                                 let children = grandparent.borrow().children.clone();
                                 for child in children.iter().rev() {
                                     if let AstNode::Case { end_pos, potential_otherwise_pos, .. } = child.node.as_ref() {
@@ -1064,6 +1070,7 @@ impl<'a> DecompilerState<'a> {
                 self.bytecode_tags[target_index].tag = BytecodeTag::EndCase;
                 // Add otherwise
                 let ow = Rc::new(RefCell::new(OtherwiseNode::new()));
+                ow.borrow().block.borrow_mut().end_pos = target_pos as u32;
                 if let AstNode::Case { otherwise, .. } = case_stmt.as_ref() {
                     otherwise.borrow_mut().replace(ow.clone());
                 }
@@ -1327,16 +1334,8 @@ impl<'a> DecompilerState<'a> {
                         }
                     }
                 }
-                "count" if nargs == 2 => {
-                    if let Some(datum) = args[1].get_value() {
-                        if datum.datum_type == DatumType::Symbol {
-                            let obj = args[0].clone();
-                            let prop_name = datum.string_value.clone();
-                            let prop_expr = Rc::new(AstNode::ObjProp { obj, prop: prop_name });
-                            return Some(Rc::new(AstNode::ObjProp { obj: prop_expr, prop: "count".to_string() }));
-                        }
-                    }
-                }
+                // `obj.count(#prop)` stays as written. ProjectorRays prints it as `obj.prop.count`, which is
+                // also how a plain property chain prints, and the compiler has to tell the two apart.
                 "setContents" | "setContentsAfter" | "setContentsBefore" if nargs == 2 => {
                     let put_type = match method {
                         "setContents" => PutType::Into,
@@ -1726,7 +1725,7 @@ impl<'a> DecompilerState<'a> {
                 Self::collect_block_lines(&block1.borrow(), dot, indent + 1, lines, bytecode_to_line);
 
                 // Else
-                if has_else.get() && !block2.borrow().children.is_empty() {
+                if has_else.get() {
                     Self::push_line("else".to_string(), vec![], indent, lines, bytecode_to_line);
                     Self::collect_block_lines(&block2.borrow(), dot, indent + 1, lines, bytecode_to_line);
                 }
@@ -1792,9 +1791,7 @@ impl<'a> DecompilerState<'a> {
                 // Case labels
                 let mut current_label = first_label.borrow().clone();
                 while let Some(label) = current_label {
-                    let label_ref = label.borrow();
-                    Self::collect_case_label_lines(&label_ref, dot, indent + 1, lines, bytecode_to_line);
-                    current_label = label_ref.next_label.clone();
+                    current_label = Self::collect_case_label_lines(&label, dot, indent + 1, lines, bytecode_to_line);
                 }
 
                 // Otherwise
@@ -1816,24 +1813,33 @@ impl<'a> DecompilerState<'a> {
     }
 
     /// Collect lines for a case label
-    fn collect_case_label_lines(label: &CaseLabelNode, dot: bool, indent: u32, lines: &mut Vec<DecompiledLine>, bytecode_to_line: &mut HashMap<usize, usize>) {
-        // Render the label value(s)
+    /// Writes one case branch, `a, b, c:` and its statements, and returns the label that starts the next branch.
+    ///
+    /// Labels that share a branch are chained through `next_or`; the branch's statements and the link to the
+    /// next branch hang off the last label of that chain.
+    fn collect_case_label_lines(label: &Rc<RefCell<CaseLabelNode>>, dot: bool, indent: u32, lines: &mut Vec<DecompiledLine>, bytecode_to_line: &mut HashMap<usize, usize>) -> Option<Rc<RefCell<CaseLabelNode>>> {
         let mut code = CodeWriter::new();
-        label.value.write_script(&mut code, dot, false);
+        label.borrow().value.write_script(&mut code, dot, false);
 
-        // Chained "or" values
-        let mut current_or = label.next_or.clone();
-        while let Some(or_label) = current_or {
-            code.write(", ");
-            or_label.borrow().value.write_script(&mut code, dot, false);
-            current_or = or_label.borrow().next_or.clone();
+        let mut last = label.clone();
+        loop {
+            let next = last.borrow().next_or.clone();
+            match next {
+                Some(or_label) => {
+                    code.write(", ");
+                    or_label.borrow().value.write_script(&mut code, dot, false);
+                    last = or_label;
+                }
+                None => break,
+            }
         }
 
         code.write(":");
         Self::push_line(code.into_string(), vec![], indent, lines, bytecode_to_line);
 
-        // Case label block contents
-        Self::collect_block_lines(&label.block.borrow(), dot, indent + 1, lines, bytecode_to_line);
+        let last_ref = last.borrow();
+        Self::collect_block_lines(&last_ref.block.borrow(), dot, indent + 1, lines, bytecode_to_line);
+        last_ref.next_label.clone()
     }
 }
 
@@ -1845,72 +1851,27 @@ fn is_zero(node: &Rc<AstNode>) -> bool {
     }
 }
 
-fn get_movie_property_name(id: i32) -> String {
-    match id {
-        0x01 => "floatPrecision".to_string(),
-        0x02 => "mouseDownScript".to_string(),
-        0x03 => "mouseUpScript".to_string(),
-        0x04 => "keyDownScript".to_string(),
-        0x05 => "keyUpScript".to_string(),
-        0x06 => "timeoutScript".to_string(),
-        0x07 => "short time".to_string(),
-        0x08 => "abbr time".to_string(),
-        0x09 => "long time".to_string(),
-        0x0a => "short date".to_string(),
-        0x0b => "abbr date".to_string(),
-        _ => format!("movieProp_{}", id),
+fn table_name(table: &[(u8, &'static str)], id: i32, what: &str) -> String {
+    match tables::name_of(table, id as i64) {
+        Some(name) => name.to_string(),
+        None => format!("{}_{}", what, id),
     }
+}
+
+fn get_movie_property_name(id: i32) -> String {
+    table_name(tables::MOVIE_PROPS, id, "movieProp")
 }
 
 fn get_animation_property_name(id: i32) -> String {
-    match id {
-        0x01 => "beepOn".to_string(),
-        0x02 => "buttonStyle".to_string(),
-        0x03 => "centerStage".to_string(),
-        0x04 => "checkBoxAccess".to_string(),
-        0x05 => "checkBoxType".to_string(),
-        0x06 => "colorDepth".to_string(),
-        0x07 => "colorQD".to_string(),
-        0x08 => "exitLock".to_string(),
-        0x09 => "fixStageSize".to_string(),
-        0x0a => "fullColorPermit".to_string(),
-        0x0b => "imageDirect".to_string(),
-        0x0c => "doubleClick".to_string(),
-        _ => format!("animProp_{}", id),
-    }
+    table_name(tables::ANIM_PROPS, id, "animProp")
 }
 
 fn get_animation2_property_name(id: i32) -> String {
-    match id {
-        0x01 => "the number of castMembers".to_string(),
-        0x02 => "the number of castMembers".to_string(),
-        0x03 => "the number of menus".to_string(),
-        _ => format!("anim2Prop_{}", id),
-    }
+    table_name(tables::ANIM2_PROPS, id, "anim2Prop")
 }
 
 fn get_member_property_name(id: i32) -> String {
-    match id {
-        0x01 => "name".to_string(),
-        0x02 => "text".to_string(),
-        0x03 => "textStyle".to_string(),
-        0x04 => "textFont".to_string(),
-        0x05 => "textHeight".to_string(),
-        0x06 => "textAlign".to_string(),
-        0x07 => "textSize".to_string(),
-        0x08 => "picture".to_string(),
-        0x09 => "hilite".to_string(),
-        0x0a => "number".to_string(),
-        0x0b => "size".to_string(),
-        0x0c => "loop".to_string(),
-        0x0d => "duration".to_string(),
-        0x0e => "controller".to_string(),
-        0x0f => "directToStage".to_string(),
-        0x10 => "sound".to_string(),
-        0x11 => "foreColor".to_string(),
-        0x12 => "backColor".to_string(),
-        _ => format!("memberProp_{}", id),
-    }
+    table_name(tables::MEMBER_PROPS, id, "memberProp")
 }
 
 /// Main entry point for decompiling a handler

@@ -135,6 +135,7 @@ impl VirtualScriptRegistry {
                 literals: vec![],
                 handlers: vec![],
                 property_name_ids: vec![],
+            global_name_ids: vec![],
                 property_defaults: HashMap::new(),
             },
             script_type,

@@ -138,6 +138,13 @@ impl Datum {
             code.write("/* MAX DEPTH */");
             return;
         }
+        {
+            let mut text = String::new();
+            super::printer::write_datum(&mut text, self, depth);
+            code.write(&text);
+            return;
+        }
+        #[allow(unreachable_code)]
         match self.datum_type {
             DatumType::Void => code.write("VOID"),
             DatumType::Int => code.write(&self.int_value.to_string()),
@@ -425,6 +432,12 @@ impl AstNode {
             code.write("/* MAX DEPTH */");
             return;
         }
+        // One-line statements and expressions: the printer the compiler can read back (see printer.rs).
+        let mut text = String::new();
+        if super::printer::write_node(&mut text, self, depth) {
+            code.write(&text);
+            return;
+        }
         match self {
             AstNode::Error => code.write("ERROR"),
             AstNode::Comment(text) => {
@@ -667,7 +680,7 @@ impl AstNode {
                 code.indent();
                 block1.borrow().write_script_with_depth(code, dot, sum, depth + 1);
                 code.unindent();
-                if has_else.get() && !block2.borrow().children.is_empty() {
+                if has_else.get() {
                     code.write("else");
                     code.end_line();
                     code.indent();

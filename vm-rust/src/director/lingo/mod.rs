@@ -1,3 +1,4 @@
+pub mod compiler;
 pub mod constants;
 pub mod datum;
 pub mod decompiler;
