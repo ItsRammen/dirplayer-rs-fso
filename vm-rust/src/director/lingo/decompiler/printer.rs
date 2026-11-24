@@ -97,7 +97,7 @@ fn is_atomic(node: &AstNode) -> bool {
             DatumType::ArgList | DatumType::ArgListNoRet => false,
             _ => true,
         },
-        AstNode::Var(_) | AstNode::Member { .. } | AstNode::ObjProp { .. } | AstNode::ObjBracket { .. } | AstNode::ObjPropIndex { .. } | AstNode::ObjCall { .. } | AstNode::Error => true,
+        AstNode::Var(_) | AstNode::Paren(_) | AstNode::Member { .. } | AstNode::ObjProp { .. } | AstNode::ObjBracket { .. } | AstNode::ObjPropIndex { .. } | AstNode::ObjCall { .. } | AstNode::Error => true,
         AstNode::Call { name, args } => !call_without_parens(name, args),
         _ => false,
     }
@@ -195,6 +195,11 @@ pub fn write_node(code: &mut String, node: &AstNode, depth: usize) -> bool {
         }
         AstNode::Literal(datum) => write_datum(code, datum, depth),
         AstNode::Var(name) => code.push_str(name),
+        AstNode::Paren(inner) => {
+            code.push('(');
+            write_node(code, inner, depth + 1);
+            code.push(')');
+        }
         AstNode::Assignment { variable, value, force_verbose } => {
             if *force_verbose {
                 code.push_str("set ");
@@ -248,8 +253,9 @@ pub fn write_node(code: &mut String, node: &AstNode, depth: usize) -> bool {
                 operand(code, last, depth);
             }
             code.push_str(" of ");
-            let bigger_chunk = matches!(string.as_ref(), AstNode::ChunkExpr { chunk_type: inner, .. } if (*inner as u8) > (*chunk_type as u8));
-            if bigger_chunk {
+            // A chunk directly inside is part of the same instruction (the decompiler wraps a separate one
+            // in `Paren`), so it prints bare: `char 1 of word 2 of x`.
+            if matches!(string.as_ref(), AstNode::ChunkExpr { .. }) {
                 write_node(code, string, depth + 1);
             } else {
                 operand(code, string, depth);

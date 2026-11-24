@@ -1445,7 +1445,9 @@ impl<'a> DecompilerState<'a> {
         let last_char = self.pop();
         let first_char = self.pop();
 
-        let mut result = string;
+        // A chunk expression that arrives as the string is an instruction of its own; keep it apart from
+        // the ranges of this one in print.
+        let mut result = if matches!(string.as_ref(), AstNode::ChunkExpr { .. }) { Rc::new(AstNode::Paren(string)) } else { string };
 
         // Build chunk expression from innermost to outermost
         if !is_zero(&first_line) {
@@ -1494,7 +1496,9 @@ impl<'a> DecompilerState<'a> {
         let last_char = self.pop_with_indices(indices);
         let first_char = self.pop_with_indices(indices);
 
-        let mut result = string;
+        // A chunk expression that arrives as the string is an instruction of its own; keep it apart from
+        // the ranges of this one in print.
+        let mut result = if matches!(string.as_ref(), AstNode::ChunkExpr { .. }) { Rc::new(AstNode::Paren(string)) } else { string };
 
         // Build chunk expression from innermost to outermost
         if !is_zero(&first_line) {

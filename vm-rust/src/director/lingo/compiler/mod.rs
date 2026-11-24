@@ -10,7 +10,10 @@
 pub mod ast;
 pub mod codegen;
 pub mod lexer;
+pub mod movie;
 pub mod parser;
+pub mod patch;
+pub mod sha256;
 pub mod stock;
 pub mod tables;
 
