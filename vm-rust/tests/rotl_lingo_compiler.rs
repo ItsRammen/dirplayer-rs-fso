@@ -349,6 +349,34 @@ fn patch_file_header() {
 }
 
 #[test]
+fn patch_file_of_edits() {
+    use vm_rust::director::lingo::compiler::movie::apply_edits;
+    let head = "-- lingo-patch 1\n-- script: Scripts/11 (ITEM DRAW)\n-- handler: DrawItems\n-- stock: abc\n-- why: More object slots.\n";
+    let patch = PatchFile::parse(&format!("{}@@ replace\n  repeat with x = 230 to 249\n@@ with\n  repeat with n = 1 to 40\n    x = ObjSprite(n)\n@@ end\n\n-- a note between edits\n@@ replace all\n  xxx = x - 229\n@@ with\n  xxx = n\n@@ end\n", head)).unwrap();
+    assert_eq!(patch.edits.len(), 2);
+    assert_eq!((patch.edits[0].count, patch.edits[1].count), (Some(1), None));
+    let stock = "on DrawItems\n  repeat with x = 230 to 249\n    xxx = x - 229\n    foo(xxx)\n    xxx = x - 229\n  end repeat\nend\n";
+    let out = apply_edits(stock, &patch.edits).unwrap();
+    assert_eq!(out, "on DrawItems\n  repeat with n = 1 to 40\n    x = ObjSprite(n)\n  xxx = n\n    foo(xxx)\n  xxx = n\n  end repeat\nend\n");
+    // An edit must match as often as it says: the movie's text is the reference, and a miss is an error.
+    assert!(apply_edits("on DrawItems\nend\n", &patch.edits).unwrap_err().contains("matches the movie's handler 0 time(s)"));
+    let twice = "on a\n  repeat with x = 230 to 249\n  end repeat\n  repeat with x = 230 to 249\n  end repeat\nend\n";
+    assert!(apply_edits(twice, &patch.edits[..1]).unwrap_err().contains("2 time(s); it says 1"));
+    // Several lines match as a run, whatever their indentation.
+    let multi = PatchFile::parse(&format!("{}@@ replace 2\nif a then\n  b = 1\n@@ with\nif a then\n  b = 2\n@@ end\n", head)).unwrap();
+    assert_eq!(apply_edits("on h\n    if a then\n        b = 1\n    end if\n  if a then\n    b = 1\n  end if\nend\n", &multi.edits).unwrap().matches("b = 2").count(), 2);
+    // An empty `with` deletes the lines.
+    let delete = PatchFile::parse(&format!("{}@@ replace\n  foo(xxx)\n@@ with\n@@ end\n", head)).unwrap();
+    assert!(!apply_edits(stock, &delete.edits).unwrap().contains("foo"));
+    // Malformed files say where.
+    for (bad, want) in [("@@ replace\n  x\n", "no `@@ end`"), ("@@ replace\n@@ with\n@@ end\n", "names no lines"), ("@@ with\n", "follows the lines"), ("@@ replace\n x\n@@ with\n y\n@@ end\nstray = 1\n", "every line belongs"), ("@@ replace 0\n x\n@@ with\n@@ end\n", "a number"), ("@@ frobnicate\n", "expected")] {
+        let err = PatchFile::parse(&format!("{}{}", head, bad)).unwrap_err();
+        assert!(err.contains(want), "{} -> {}", bad, err);
+    }
+    assert!(PatchFile::parse(&format!("{}@@ replace\n x\n@@ with\n y\n@@ end\n", head.replace("-- stock: abc\n", "-- new: yes\n"))).unwrap_err().contains("new handler"));
+}
+
+#[test]
 fn secrets_rule() {
     assert_eq!(redact_strings("x = foo(\"abc\", 5) & \"d\"\ny = \"e\"\n"), "x = foo(\"<redacted>\", 5) & \"<redacted>\"\ny = \"<redacted>\"\n");
     assert!(static_secret_problems("x = baDecryptText(a, b)").len() == 1);

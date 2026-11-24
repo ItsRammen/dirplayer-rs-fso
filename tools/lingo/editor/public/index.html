@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lingo patch editor</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header id="top">
+  <h1>Lingo patch editor</h1>
+  <span class="meta">movie <code id="cfg-movie">...</code></span>
+  <span class="meta">patches <code id="cfg-patches">...</code></span>
+  <span id="busy" class="busy" hidden>working...</span>
+  <span class="note">Local tool. It saves patch files only; it never runs git and never deploys.</span>
+</header>
+
+<div id="page-error" class="banner error" role="alert" hidden>
+  <span id="page-error-text"></span>
+  <button type="button" id="page-error-close">Dismiss</button>
+</div>
+
+<main>
+  <!-- Left: find a handler, or an existing patch file -->
+  <nav id="side" aria-label="Find a handler or a patch">
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" data-side="scripts" aria-selected="true">Scripts</button>
+      <button type="button" role="tab" data-side="search" aria-selected="false">Search</button>
+      <button type="button" role="tab" data-side="patches" aria-selected="false">Patch files <span id="patch-count"></span></button>
+    </div>
+
+    <section id="side-scripts" class="side-panel">
+      <label class="field">Filter scripts and handlers
+        <input type="search" id="script-filter" placeholder="name, member number or handler" autocomplete="off" spellcheck="false">
+      </label>
+      <div id="script-summary" class="hint"></div>
+      <div id="script-list" class="list">Loading the movie's scripts...</div>
+    </section>
+
+    <section id="side-search" class="side-panel" hidden>
+      <form id="search-form">
+        <label class="field">Search the decompiled source
+          <input type="search" id="search-text" placeholder="text on a line of Lingo" autocomplete="off" spellcheck="false">
+        </label>
+        <button type="submit">Search</button>
+      </form>
+      <div id="search-summary" class="hint"></div>
+      <div id="search-results" class="list"></div>
+    </section>
+
+    <section id="side-patches" class="side-panel" hidden>
+      <div class="row">
+        <button type="button" id="patches-refresh">Check again</button>
+        <span id="patches-summary" class="hint"></span>
+      </div>
+      <div id="patch-list" class="list"></div>
+    </section>
+  </nav>
+
+  <!-- Middle: the handler as the movie has it (read-only) -->
+  <section id="stock" aria-label="The movie's handler">
+    <div class="pane-head">
+      <h2 id="stock-title">No handler chosen</h2>
+      <div id="stock-meta" class="hint">Pick a script on the left, then one of its handlers.</div>
+    </div>
+    <div id="stock-flags"></div>
+    <div id="stock-actions" class="row" hidden>
+      <button type="button" id="start-patch">Start a patch</button>
+      <button type="button" id="open-existing" hidden>Open its patch file</button>
+      <label class="check"><input type="checkbox" id="show-bytecode"> Show bytecode</label>
+    </div>
+    <form id="why-form" class="box" hidden>
+      <label class="field">Why: what this patch changes and what for (goes in the file's header)
+        <input type="text" id="why-text" maxlength="500" autocomplete="off">
+      </label>
+      <div class="row">
+        <button type="submit">Create the patch file</button>
+        <button type="button" id="why-cancel">Cancel</button>
+        <span id="why-file" class="hint"></span>
+      </div>
+      <div id="why-error" class="msg error" hidden></div>
+    </form>
+    <dl id="stock-names" hidden>
+      <dt>Script globals</dt><dd id="stock-globals"></dd>
+      <dt>Script properties</dt><dd id="stock-properties"></dd>
+    </dl>
+    <h3 class="sub">Stock source (read-only)</h3>
+    <pre id="stock-source" class="code" tabindex="0"></pre>
+    <div id="stock-bytecode-wrap" hidden>
+      <h3 class="sub">Stock bytecode</h3>
+      <pre id="stock-bytecode" class="code" tabindex="0"></pre>
+    </div>
+  </section>
+
+  <!-- Right: the patch being edited -->
+  <section id="patch" aria-label="The patch">
+    <div class="pane-head">
+      <h2 id="patch-title">No patch open</h2>
+      <div id="patch-meta" class="hint">Start a patch for a handler, or open one from "Patch files".</div>
+    </div>
+    <div id="patch-body" hidden>
+      <div class="row">
+        <button type="button" id="save">Save</button>
+        <button type="button" id="jump-stock">Show the movie's handler</button>
+        <span id="dirty" class="hint"></span>
+        <span id="compile-state" class="state"></span>
+      </div>
+      <label for="editor" class="sub">Patch source (Tab inserts two spaces)</label>
+      <div id="editor-wrap">
+        <div id="gutter" aria-hidden="true"></div>
+        <textarea id="editor" wrap="off" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+      </div>
+
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" data-out="check" aria-selected="true">Check</button>
+        <button type="button" role="tab" data-out="sdiff" aria-selected="false">Source diff</button>
+        <button type="button" role="tab" data-out="bdiff" aria-selected="false">Bytecode diff</button>
+        <button type="button" role="tab" data-out="run" aria-selected="false">Run</button>
+        <button type="button" role="tab" data-out="rig" aria-selected="false" id="rig-tab" hidden>Rig</button>
+        <button type="button" role="tab" data-out="saved" aria-selected="false">Save result</button>
+      </div>
+
+      <div id="out-check" class="out"></div>
+      <pre id="out-sdiff" class="out code diff" hidden></pre>
+      <pre id="out-bdiff" class="out code diff" hidden></pre>
+
+      <div id="out-run" class="out" hidden>
+        <label class="field">Lingo to run, in order (a blank line starts a new block; each block is run on its own)
+          <textarea id="run-evals" rows="4" spellcheck="false" placeholder='TheInf = "W-Eyepatch:W-Sword"&#10;LoadInf(TheInf)'></textarea>
+        </label>
+        <label class="field">Globals to read afterwards (names separated by spaces or commas)
+          <input type="text" id="run-globals" spellcheck="false" autocomplete="off" placeholder="HeadImage, Weapon">
+        </label>
+        <div class="row">
+          <label class="check"><input type="checkbox" id="run-offline" checked> Offline connection (sendNetMessage does nothing)</label>
+          <label class="check"><input type="checkbox" id="run-patch" checked> Apply the editor text as a patch</label>
+        </div>
+        <div class="row">
+          <button type="button" id="run-go">Run</button>
+          <span id="run-state" class="hint"></span>
+        </div>
+        <div id="run-results"></div>
+      </div>
+
+      <div id="out-rig" class="out" hidden>
+        <p class="hint">Rig: <code id="rig-origin"></code>. The rig gets the <strong>saved</strong> file, so save first.
+          Paste a snippet into the browser console of the rig page.</p>
+        <label class="field">Apply this patch on the rig
+          <textarea id="rig-set" rows="6" readonly spellcheck="false"></textarea>
+        </label>
+        <button type="button" data-copy="rig-set">Copy</button>
+        <label class="field">Put the movie's own handlers back
+          <textarea id="rig-clear" rows="2" readonly spellcheck="false"></textarea>
+        </label>
+        <button type="button" data-copy="rig-clear">Copy</button>
+      </div>
+
+      <div id="out-saved" class="out" hidden>
+        <p class="hint">Not saved yet in this session.</p>
+      </div>
+    </div>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

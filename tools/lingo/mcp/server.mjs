@@ -171,7 +171,7 @@ export const TOOLS = [
   {
     name: 'lingo_new_patch',
     description: 'Start a patch file for a handler: a header (script, handler, the stock fingerprint, `enabled: no`, your `why`) followed by the handler\'s own source, ready to edit. Fails if the file exists or the handler cannot be patched. Returns the file\'s path and text.',
-    inputSchema: { type: 'object', properties: { ref: str('"<cast>/<member>/<handler>"'), why: str('What the patch changes and why, in a sentence or two. It goes in the file\'s header.') }, required: ['ref', 'why'] },
+    inputSchema: { type: 'object', properties: { ref: str('"<cast>/<member>/<handler>"'), why: str('What the patch changes and why, in a sentence or two. It goes in the file\'s header.'), edits: { type: 'boolean', description: 'Start a file of edits instead of a copy of the whole handler: blocks of `@@ replace` / lines of the stock handler / `@@ with` / new lines / `@@ end` (`@@ replace all` or `@@ replace 3` when the lines occur more than once). Prefer this for a small change to a long handler.' } }, required: ['ref', 'why'] },
   },
   {
     name: 'lingo_write_patch',
@@ -180,7 +180,7 @@ export const TOOLS = [
   },
   {
     name: 'lingo_check_patch',
-    description: 'Compile a patch and check it against the movie: the gate (the stock handler must recompile to its exact bytes), the fingerprint, compile errors with line and column, warnings, and a diff of source and bytecode against the stock handler. Give `file` for a saved patch or `text` to check without saving.',
+    description: 'Compile a patch and check it against the movie (for a file of edits, `resolvedSource` is the handler the edits produce, and error lines refer to it): the gate (the stock handler must recompile to its exact bytes), the fingerprint, compile errors with line and column, warnings, and a diff of source and bytecode against the stock handler. Give `file` for a saved patch or `text` to check without saving.',
     inputSchema: { type: 'object', properties: { file: str('A saved patch file'), text: str('Or the text of a patch, not saved') } },
   },
   {
@@ -255,7 +255,7 @@ export async function callTool(config, name, args = {}) {
       const relative = defaultPatchFile(shown.cast || cast, shown.member || member, shown.script, shown.handler);
       const full = patchPath(config, relative);
       if (fs.existsSync(full)) throw new Error(`${relative} already exists; read it and write a new version instead`);
-      const made = await runTool(config, ['new', args.ref, '-o', full, '--why', args.why.replace(/\s+/g, ' ').trim(), '--json']);
+      const made = await runTool(config, ['new', args.ref, '-o', full, '--why', args.why.replace(/\s+/g, ' ').trim(), ...(args.edits ? ['--edits'] : []), '--json']);
       if (made.code !== 0) throw new Error(made.stderr.trim().split('\n').pop() || 'the tool could not start the patch');
       return { file: relative, text: fs.readFileSync(full, 'utf8'), note: 'enabled: no. Edit the handler, then lingo_write_patch and lingo_check_patch.' };
     }

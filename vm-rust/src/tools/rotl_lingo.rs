@@ -19,6 +19,9 @@
 //! The movie comes from `--movie <path>` or `$ROTL_LINGO_MOVIE`. `--json` gives machine-readable output.
 //! `<member>` is the member's number, or its name when that is unique in the cast.
 //!
+//! A patch file is one whole handler, or a list of edits to the stock handler (`@@ replace` / `@@ with` / `@@ end`;
+//! see `Edit` in compiler/movie.rs). `new --edits` starts the second kind.
+//!
 //! Handlers that deal with the connection have their strings replaced in every output, and patches for them
 //! are refused (see compiler/movie.rs).
 
@@ -45,6 +48,7 @@ struct Args {
     offline: bool,
     all: bool,
     static_only: bool,
+    edits: bool,
 }
 
 fn usage() -> ! {
@@ -55,8 +59,18 @@ fn usage() -> ! {
 fn parse_args() -> Args {
     let mut raw = std::env::args().skip(1);
     let Some(command) = raw.next() else { usage() };
-    let mut args = Args { command, positional: Vec::new(), movie: std::env::var("ROTL_LINGO_MOVIE").ok().filter(|s| !s.is_empty()), json: false, bytecode: false, failures: false, out: None, why: None, patches: Vec::new(), evals: Vec::new(), offline: false, all: false, static_only: false };
+    let mut args = Args { command, positional: Vec::new(), movie: std::env::var("ROTL_LINGO_MOVIE").ok().filter(|s| !s.is_empty()), json: false, bytecode: false, failures: false, out: None, why: None, patches: Vec::new(), evals: Vec::new(), offline: false, all: false, static_only: false, edits: false };
+    let mut options_done = false;
     while let Some(arg) = raw.next() {
+        // After `--` everything is a plain argument, so a search text may start with a dash.
+        if options_done {
+            args.positional.push(arg);
+            continue;
+        }
+        if arg == "--" {
+            options_done = true;
+            continue;
+        }
         let mut value = |name: &str| raw.next().unwrap_or_else(|| fail(2, &format!("{} needs a value", name)));
         match arg.as_str() {
             "--movie" => args.movie = Some(value("--movie")),
@@ -66,6 +80,7 @@ fn parse_args() -> Args {
             "--all" => args.all = true,
             "--offline" => args.offline = true,
             "--static" => args.static_only = true,
+            "--edits" => args.edits = true,
             // In `manifest`: include patch files that say `enabled: no` (for trying one on a rig).
             "--include-disabled" => args.all = true,
             "-o" | "--out" => args.out = Some(value("-o")),
@@ -168,6 +183,8 @@ fn cmd_show(args: &Args) {
         });
         if let Some(why) = trip.refusal() {
             entry["refusal"] = json!(why);
+        } else if sensitive {
+            entry["refusal"] = json!("it handles the connection: its strings are hidden and it cannot be patched");
         }
         if args.bytecode {
             entry["bytecode"] = json!(bytecode_lines(&movie, script, &trip.stock));
@@ -278,7 +295,14 @@ fn cmd_new(args: &Args) {
         fail(1, &format!("`{}` cannot be patched: {}", handler, why));
     }
     let why = args.why.clone().unwrap_or_else(|| "(say what this changes and why)".to_string());
-    let text = PatchFile::scaffold(script, &script.handlers[index], &fingerprint(&trip.source, &trip.stock), &trip.source, &why);
+    // --edits: a file of changes. It starts with one edit that changes nothing, to show the form.
+    let body = if args.edits {
+        let first = trip.source.lines().find(|l| !l.trim_start().starts_with("on ") && !l.trim_start().starts_with("global ") && !l.trim().is_empty()).unwrap_or("").trim().to_string();
+        format!("@@ replace\n  {}\n@@ with\n  {}\n@@ end\n", first, first)
+    } else {
+        trip.source.clone()
+    };
+    let text = PatchFile::scaffold(script, &script.handlers[index], &fingerprint(&trip.source, &trip.stock), &body, &why);
     match &args.out {
         Some(path) => {
             if Path::new(path).exists() {
@@ -314,7 +338,9 @@ fn examine(movie: Option<&Movie>, path: &Path) -> Value {
         Err(e) => {
             // Even a file whose header is wrong must not carry connection code.
             let mut all = vec![e];
-            all.extend(static_secret_problems(&text));
+            let secret = static_secret_problems(&text);
+            report["secret"] = json!(!secret.is_empty());
+            all.extend(secret);
             report["problems"] = json!(all);
             return report;
         }
@@ -329,15 +355,23 @@ fn examine(movie: Option<&Movie>, path: &Path) -> Value {
     report["stock"] = json!(patch.stock);
     let Some(movie) = movie else {
         problems.extend(static_secret_problems(&patch.source));
+        report["secret"] = json!(!problems.is_empty());
         report["ok"] = json!(problems.is_empty());
         report["problems"] = json!(problems);
         return report;
     };
     let secrets = secret_problems(movie, &patch);
     let has_secrets = !secrets.is_empty();
+    // Set when the file must not be saved or committed at all, as opposed to merely not compiling yet.
+    report["secret"] = json!(has_secrets);
     problems.extend(secrets);
+    report["form"] = json!(if patch.edits.is_empty() { "handler" } else { "edits" });
     match movie.prepare(&patch) {
-        Ok(prepared) => {
+        Ok((prepared, resolved)) => {
+            if !patch.edits.is_empty() {
+                // What the edits make of the stock handler; compile errors give lines of this text.
+                report["resolvedSource"] = json!(resolved);
+            }
             report["bytes"] = json!(prepared.compiled_len);
             report["stockBytes"] = json!(prepared.stock_len);
             report["newNames"] = json!(prepared.names[prepared.names_before..].to_vec());
@@ -358,10 +392,16 @@ fn examine(movie: Option<&Movie>, path: &Path) -> Value {
             }
             // The source goes into the manifest only when nothing is wrong with the file.
             if !has_secrets {
-                report["source"] = json!(patch.source);
+                report["source"] = json!(resolved);
             }
         }
         Err(refusal) => {
+            if !patch.edits.is_empty() {
+                // A compile error names a line of the edited handler, so show that text.
+                if let Ok(resolved) = movie.resolved_source(&patch) {
+                    report["resolvedSource"] = json!(resolved);
+                }
+            }
             report["refused"] = json!(refusal.kind());
             if let Refusal::Compile { line, col, .. } = &refusal {
                 report["line"] = json!(line);
@@ -432,6 +472,7 @@ fn slim(mut report: Value, keep_bytecode: bool, keep_source: bool) -> Value {
         if !keep_source {
             map.remove("source");
             map.remove("stockSource");
+            map.remove("resolvedSource");
         }
     }
     report
@@ -529,14 +570,19 @@ fn unpositioned(lines: &Value) -> Vec<String> {
 fn cmd_diff(args: &Args) {
     let Some(file) = args.positional.first() else { fail(2, "diff needs a patch file") };
     let movie = load_movie(args);
-    let report = examine(Some(&movie), Path::new(file));
+    let mut report = examine(Some(&movie), Path::new(file));
     let text = std::fs::read_to_string(file).unwrap_or_default();
     let stock_source = report["stockSource"].as_str().unwrap_or("").to_string();
-    let source_diff = with_context(&line_diff(&body_lines(&stock_source), &body_lines(&text)), 3);
+    let patched = report["resolvedSource"].as_str().map(|s| s.to_string()).unwrap_or(text);
+    let source_diff = with_context(&line_diff(&body_lines(&stock_source), &body_lines(&patched)), 3);
     let bytecode_diff = with_context(&line_diff(&unpositioned(&report["stockBytecode"]), &unpositioned(&report["bytecode"])), 2);
     let ok = report["ok"].as_bool().unwrap_or(false);
     if args.json {
+        let resolved = report["resolvedSource"].take();
         let mut out = slim(report, false, false);
+        if !resolved.is_null() {
+            out["resolvedSource"] = resolved;
+        }
         out["sourceDiff"] = json!(source_diff);
         out["bytecodeDiff"] = json!(bytecode_diff);
         println!("{}", out);
@@ -660,6 +706,10 @@ fn cmd_run(args: &Args) {
         for file in patch_files(&args.patches) {
             let report = examine(Some(&movie), &file);
             if !report["ok"].as_bool().unwrap_or(false) {
+                if args.json {
+                    println!("{}", json!({ "ok": false, "notRun": true, "error": "not run: a patch file has problems", "report": slim(report, false, false) }));
+                    std::process::exit(1);
+                }
                 print_report(&report, false);
                 fail(1, "not run: a patch file has problems");
             }

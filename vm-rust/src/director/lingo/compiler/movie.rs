@@ -179,12 +179,27 @@ impl Movie {
         sensitive
     }
 
-    /// Checks a patch against the movie without changing anything.
-    pub fn prepare(&self, patch_file: &PatchFile) -> Result<Prepared, Refusal> {
+    /// The handler source a patch file stands for: the file itself, or the stock handler with the file's edits made.
+    pub fn resolved_source(&self, patch_file: &PatchFile) -> Result<String, Refusal> {
+        if patch_file.edits.is_empty() {
+            return Ok(patch_file.source.clone());
+        }
+        let script = self.find_script(&patch_file.cast, &patch_file.member.to_string()).map_err(Refusal::NotFound)?;
+        let (_, handler) = self.find_handler(script, &patch_file.handler).map_err(Refusal::NotFound)?;
+        if self.handler_is_sensitive(script, handler) {
+            return Err(Refusal::Invalid(format!("`{}` handles the connection; it cannot be patched", patch_file.handler)));
+        }
+        apply_edits(&self.source(script, handler, true), &patch_file.edits).map_err(Refusal::Invalid)
+    }
+
+    /// Checks a patch against the movie without changing anything. Also returns the source that was compiled.
+    pub fn prepare(&self, patch_file: &PatchFile) -> Result<(Prepared, String), Refusal> {
         let script = self.find_script(&patch_file.cast, &patch_file.member.to_string()).map_err(Refusal::NotFound)?;
         let (version, multiplier) = self.version(script);
-        let request = PatchRequest { handler: &patch_file.handler, source: &patch_file.source, stock: patch_file.stock.as_deref(), new_handler: patch_file.new_handler };
-        patch::prepare(self.lctx(script), script.script_id, &request, version, multiplier)
+        let source = self.resolved_source(patch_file)?;
+        let request = PatchRequest { handler: &patch_file.handler, source: &source, stock: patch_file.stock.as_deref(), new_handler: patch_file.new_handler };
+        let prepared = patch::prepare(self.lctx(script), script.script_id, &request, version, multiplier)?;
+        Ok((prepared, source))
     }
 }
 
@@ -265,6 +280,132 @@ pub struct PatchFile {
     pub why: String,
     /// The whole file. The header lines are comments, so line numbers in errors match the file.
     pub source: String,
+    /// When the file gives changes to the stock handler instead of the whole handler (see `Edit`).
+    pub edits: Vec<Edit>,
+}
+
+/// One change to the stock handler's source, for a patch file that holds changes instead of a whole handler:
+///
+/// ```text
+/// @@ replace            (or `@@ replace all`, or `@@ replace 3` for exactly three places)
+///   repeat with x = 230 to 249
+/// @@ with
+///   repeat with x = 230 to 269
+/// @@ end
+/// ```
+///
+/// The lines to replace must be found in the stock source as a run of whole lines (indentation aside),
+/// exactly as many times as the edit says: once, unless it says otherwise. The file then stays a short,
+/// reviewable difference, and the movie's own text stays out of the repository.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Edit {
+    pub find: Vec<String>,
+    pub with: Vec<String>,
+    /// How many places must match; `None` for `all` (at least one).
+    pub count: Option<usize>,
+    /// The line of the file the edit starts on.
+    pub line: usize,
+}
+
+fn parse_edits(text: &str) -> Result<Vec<Edit>, String> {
+    let mut edits = Vec::new();
+    let mut current: Option<Edit> = None;
+    let mut in_with = false;
+    let mut started = false;
+    for (index, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if !started {
+            if line.is_empty() || line.starts_with("--") {
+                continue;
+            }
+            started = true;
+        }
+        if let Some(rest) = line.strip_prefix("@@") {
+            let mut words = rest.split_whitespace();
+            match words.next() {
+                Some("replace") => {
+                    if current.is_some() {
+                        return Err(format!("line {}: the edit before this one has no `@@ end`", index + 1));
+                    }
+                    let count = match words.next() {
+                        None => Some(1),
+                        Some("all") => None,
+                        Some(n) => Some(n.parse::<usize>().ok().filter(|n| *n > 0).ok_or_else(|| format!("line {}: `@@ replace` takes nothing, `all` or a number", index + 1))?),
+                    };
+                    current = Some(Edit { count, line: index + 1, ..Default::default() });
+                    in_with = false;
+                }
+                Some("with") => {
+                    if current.is_none() || in_with {
+                        return Err(format!("line {}: `@@ with` follows the lines of an `@@ replace`", index + 1));
+                    }
+                    in_with = true;
+                }
+                Some("end") => {
+                    let edit = current.take().filter(|_| in_with).ok_or_else(|| format!("line {}: `@@ end` closes an `@@ replace` ... `@@ with` pair", index + 1))?;
+                    if edit.find.is_empty() {
+                        return Err(format!("line {}: the edit names no lines to replace", edit.line));
+                    }
+                    edits.push(edit);
+                    in_with = false;
+                }
+                _ => return Err(format!("line {}: expected `@@ replace`, `@@ with` or `@@ end`", index + 1)),
+            }
+            continue;
+        }
+        match current.as_mut() {
+            Some(edit) => {
+                if line.is_empty() {
+                    continue;
+                }
+                if in_with {
+                    edit.with.push(raw.trim_end().to_string());
+                } else {
+                    edit.find.push(line.to_string());
+                }
+            }
+            None => {
+                if !line.is_empty() && !line.starts_with("--") {
+                    return Err(format!("line {}: in a patch file of edits, every line belongs to an `@@ replace` ... `@@ with` ... `@@ end` block", index + 1));
+                }
+            }
+        }
+    }
+    if let Some(edit) = current {
+        return Err(format!("line {}: this edit has no `@@ end`", edit.line));
+    }
+    Ok(edits)
+}
+
+/// The stock source with the edits made. An edit that does not match as often as it says is an error.
+pub fn apply_edits(stock: &str, edits: &[Edit]) -> Result<String, String> {
+    let mut lines: Vec<String> = stock.lines().map(|l| l.to_string()).collect();
+    for edit in edits {
+        let mut out: Vec<String> = Vec::with_capacity(lines.len());
+        let mut found = 0;
+        let mut i = 0;
+        while i < lines.len() {
+            let matches = i + edit.find.len() <= lines.len() && edit.find.iter().enumerate().all(|(k, want)| lines[i + k].trim() == want);
+            if matches {
+                found += 1;
+                out.extend(edit.with.iter().cloned());
+                i += edit.find.len();
+            } else {
+                out.push(lines[i].clone());
+                i += 1;
+            }
+        }
+        let first = edit.find.first().map(|s| s.as_str()).unwrap_or("");
+        match edit.count {
+            Some(n) if found != n => return Err(format!("the edit on line {} (`{}`...) matches the movie's handler {} time(s); it says {}", edit.line, first, found, n)),
+            None if found == 0 => return Err(format!("the edit on line {} (`{}`...) matches nothing in the movie's handler", edit.line, first)),
+            _ => {}
+        }
+        lines = out;
+    }
+    let mut text = lines.join("\n");
+    text.push('\n');
+    Ok(text)
 }
 
 pub const PATCH_FORMAT: u32 = 1;
@@ -276,6 +417,10 @@ impl PatchFile {
 
     pub fn parse(text: &str) -> Result<PatchFile, String> {
         let mut patch = PatchFile { enabled: true, source: text.replace("\r\n", "\n"), ..Default::default() };
+        let first_code = patch.source.lines().map(|l| l.trim()).find(|l| !l.is_empty() && !l.starts_with("--")).unwrap_or("");
+        if first_code.starts_with("@@") {
+            patch.edits = parse_edits(&patch.source)?;
+        }
         let mut saw_magic = false;
         let mut last_key = String::new();
         for (index, line) in patch.source.clone().lines().enumerate() {
@@ -337,6 +482,9 @@ impl PatchFile {
         }
         if patch.why.trim().is_empty() {
             return Err("the header has no `-- why:` line; say what the patch changes and why".to_string());
+        }
+        if !patch.edits.is_empty() && patch.new_handler {
+            return Err("a new handler has no stock source to edit; give the whole handler".to_string());
         }
         if patch.stock.is_none() && !patch.new_handler {
             return Err("the header has no `-- stock:` line (the fingerprint of the handler being replaced; `rotl-lingo new` writes it)".to_string());
