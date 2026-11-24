@@ -32,6 +32,7 @@ import {
   ime_composition_update,
   ime_composition_end,
   set_renderer_backend,
+  field_scroll_at,
 } from "vm-rust";
 import { useAppDispatch } from "../../store/hooks";
 import { channelSelected } from "../../store/uiSlice";
@@ -250,6 +251,10 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
   // tracks the in-progress single-finger interaction so we can deliver mouse_up
   // even if the finger lifts outside the canvas rect
   const singleTouchActiveRef = useRef(false);
+  // A finger that went down on a #scroll field with more text than fits. Its
+  // press is held back: a drag scrolls the field, a tap is replayed to the
+  // movie as a click where it landed (canvas coordinates).
+  const touchScrollRef = useRef<{ id: number; start: Pt; lastY: number; scrolling: boolean; down: React.PointerEvent } | null>(null);
   // The canvas THIS player locked for mouse-look, or null.
   //
   // Ownership, not "is anything locked": a page can host two DirPlayers — the
@@ -295,6 +300,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
     }
     activePointersRef.current.clear();
     singleTouchActiveRef.current = false;
+    touchScrollRef.current = null;
     suppressCanvasUntilReleaseRef.current = false;
     singlePanRef.current = null;
     middlePanRef.current = null;
@@ -385,14 +391,30 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
 
   // Trackpad pinch-to-zoom and two-finger pan via wheel events.
   // Must be a non-passive listener so we can call preventDefault().
+  // The wheel over a #scroll field with more text than fits scrolls that field
+  // (Director does the same; without it the page scrolled instead, and the
+  // field's 12-pixel arrows were the only way down a long list). Anywhere else
+  // the wheel is left to the page, or to the gestures below when enabled.
   useEffect(() => {
     const el = outerRef.current;
-    if (!el || !enableGestures) return;
+    if (!el) return;
     const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
       const rect = el.getBoundingClientRect();
       const cx = e.clientX - rect.left;
       const cy = e.clientY - rect.top;
+      if (!(enableGestures && e.ctrlKey) && isStageCanvasCreated.current) {
+        const c = outerToCanvas({ x: cx, y: cy });
+        // Lines and pages to pixels; at most three lines a step, so one notch
+        // of a 100-pixel wheel does not skip half the list.
+        const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 160 : 1;
+        const dy = Math.max(-48, Math.min(48, e.deltaY * unit));
+        if (field_scroll_at(c.x, c.y, dy)) {
+          e.preventDefault();
+          return;
+        }
+      }
+      if (!enableGestures) return;
+      e.preventDefault();
       markUserPanned();
       if (e.ctrlKey) {
         const factor = Math.pow(0.99, e.deltaY);
@@ -663,6 +685,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
         mouse_up(c.x, c.y);
         singleTouchActiveRef.current = false;
       }
+      touchScrollRef.current = null;
       singlePanRef.current = null;
       const { centroid, dist } = gestureCentroidAndDist();
       gestureRef.current = {
@@ -686,6 +709,13 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
     }
     const c = outerToCanvas(p);
     if (isInsideCanvas(c)) {
+      // A finger (not a mouse) on a long scrolling list: wait to see whether it
+      // drags (scroll the list) or lifts (a click on the line it touched).
+      if (e.pointerType !== "mouse" && !pickingMode && field_scroll_at(c.x, c.y, 0)) {
+        e.persist?.();
+        touchScrollRef.current = { id: e.pointerId, start: c, lastY: c.y, scrolling: false, down: e };
+        return;
+      }
       singleTouchActiveRef.current = true;
       dispatchVMMouse("down", c.x, c.y, e);
     }
@@ -732,6 +762,22 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
     }
 
     if (suppressCanvasUntilReleaseRef.current) return;
+
+    const ts = touchScrollRef.current;
+    if (ts && ts.id === e.pointerId) {
+      const c = outerToCanvas(p);
+      // A few pixels of wobble is still a tap.
+      if (!ts.scrolling && Math.abs(c.y - ts.start.y) > 6) {
+        ts.scrolling = true;
+        ts.lastY = c.y;
+      }
+      if (ts.scrolling) {
+        // The text follows the finger: moving up shows the lines below.
+        field_scroll_at(ts.start.x, ts.start.y, ts.lastY - c.y);
+        ts.lastY = c.y;
+      }
+      return;
+    }
 
     if (enableGestures && isTracked && singlePanRef.current) {
       markUserPanned();
@@ -793,7 +839,15 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
       return;
     }
 
-    if (singlePanRef.current) {
+    const ts = touchScrollRef.current;
+    if (ts && ts.id === e.pointerId) {
+      touchScrollRef.current = null;
+      if (!ts.scrolling) {
+        // A tap: the click the movie would have had, where the finger landed.
+        dispatchVMMouse("down", ts.start.x, ts.start.y, ts.down);
+        dispatchVMMouse("up", ts.start.x, ts.start.y, e);
+      }
+    } else if (singlePanRef.current) {
       singlePanRef.current = null;
     } else if (singleTouchActiveRef.current) {
       const c = outerToCanvas(lastP);

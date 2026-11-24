@@ -1209,6 +1209,23 @@ pub fn player_get_sprite_at(x: f64, y: f64) -> i32 {
     })
 }
 
+/// Mouse wheel or a finger drag over a `#scroll` field (the page's Stage
+/// calls it; the movie sees no event). `delta_y` is in canvas pixels, positive
+/// to show the text further down. Returns true when a field under the point has
+/// more text than fits (it is then scrolled, and the page should not scroll);
+/// false leaves the wheel to the page. `delta_y` 0 only asks.
+#[wasm_bindgen]
+pub fn field_scroll_at(canvas_x: f64, canvas_y: f64, delta_y: f64) -> bool {
+    reserve_player_mut(|player| {
+        if player.wants_pointer_lock {
+            return false;
+        }
+        let (mx, my) = crate::player::stage::canvas_to_movie_coords(player, canvas_x, canvas_y);
+        let (_, my2) = crate::player::stage::canvas_to_movie_coords(player, canvas_x, canvas_y + delta_y);
+        crate::player::commands::scroll_field_at(player, mx as i32, my as i32, my2 - my)
+    })
+}
+
 /// Check if a sprite is an editable Field or Text member (for mobile keyboard
 /// focus and to gate caret/selection events from JS).
 #[wasm_bindgen]
