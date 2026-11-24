@@ -1,6 +1,6 @@
 // A movie file's scripts, for tools: listing, source, the round trip, patch files and the secrets rule.
 //
-// Used by the `rotl-lingo` command (src/bin/rotl-lingo.rs) and by the tests. Nothing here runs in the
+// Used by the `rotl-lingo` command (src/tools/rotl_lingo.rs) and by the tests. Nothing here runs in the
 // player.
 
 use crate::director::chunks::handler::HandlerDef;
