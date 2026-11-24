@@ -4618,8 +4618,8 @@ impl CastMember {
         let payload = &raw[flsh_start + 8..];
         let vector_member = Self::parse_flsh_payload(payload);
 
-        web_sys::console::log_1(
-            &format!(
+        log::debug!(
+            "{}", format!(
                 "OLE member #{} identified as vectorShape: {} vertices, strokeWidth={}, fillMode={}, closed={}, bbox=({},{},{},{})",
                 number,
                 vector_member.vertices.len(),
@@ -4628,7 +4628,7 @@ impl CastMember {
                 vector_member.closed,
                 vector_member.bbox_left, vector_member.bbox_top,
                 vector_member.bbox_right, vector_member.bbox_bottom,
-            ).into(),
+            ),
         );
 
         let reg_point = (
@@ -5853,7 +5853,7 @@ impl CastMember {
                         name: member_info.name.clone(),
                     })
                 } else {
-                    web_sys::console::warn_1(&format!("Script member {}: script_id {} not found in Lctx, skipping", number, script_id).into());
+                    log::warn!("Script member {}: script_id {} not found in Lctx, skipping", number, script_id);
                     CastMemberType::Unknown
                 }
             }
@@ -6053,7 +6053,7 @@ impl CastMember {
                                 Some(std::rc::Rc::new(scene))
                             }
                             Err(e) => {
-                                web_sys::console::error_1(&format!("W3D parse error: {}", e).into());
+                                log::error!("W3D parse error: {}", e);
                                 Some(std::rc::Rc::new(Self::create_empty_w3d_scene()))
                             }
                         }

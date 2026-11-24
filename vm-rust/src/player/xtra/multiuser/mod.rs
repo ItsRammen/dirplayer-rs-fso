@@ -162,7 +162,7 @@ impl MultiuserXtraInstance {
         }
         // What the Modern UI page draws (party, currencies, date, teleport list, ...) is offered to it first (see `page_bridge`).
         if let StaticDatum::String(content) = &message.content {
-            if page_bridge::offer(&message.subject, content) {
+            if page_bridge::offer(&message.subject, &message.sender_id, content) {
                 return;
             }
         }
