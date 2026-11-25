@@ -1701,6 +1701,22 @@ impl Score {
             sprite.entered = true;
         }
 
+        // A scriptInstanceList read while a channel had no span (a page asking about sprite N while the movie sits on its title
+        // screen, say) cached the list it got, an empty one. The behaviours this span attaches go into the sprite's own Vec just
+        // below, and the next sync (end of frame, a key event) copied that stale cached list back over them: the sprite lost every
+        // behaviour of its span. So a channel entering a span hands what the cache holds (anything Lingo added to it) back to
+        // the sprite first, then forgets it; the next read builds a fresh list from the sprite, behaviours included.
+        if matches!(score_ref, ScoreRef::Stage) {
+            let channels: Vec<i16> = spans_to_enter.iter().map(|span| span.channel_number as i16).filter(|c| *c > 0).collect();
+            if !channels.is_empty() {
+                reserve_player_mut(|player| {
+                    for channel in channels {
+                        player.forget_script_instance_list_cache_on_span_entry(channel);
+                    }
+                });
+            }
+        }
+
         // Attach behaviors and set their parameters - GROUP BY CHANNEL
         // Group spans by channel_number to process all behaviors for a sprite at once
         let spans_by_channel: std::collections::HashMap<u32, Vec<&ScoreSpriteSpan>> =
@@ -7088,5 +7104,143 @@ mod rect_tests {
     fn a_normal_rect_is_untouched() {
         assert_eq!(normalise_rect([10, 20, 12, 50]), [10, 20, 12, 50]);
         assert_eq!(normalise_rect([0, 0, 0, 0]), [0, 0, 0, 0]);
+    }
+}
+
+#[cfg(test)]
+mod span_cache_tests {
+    //! The cached `scriptInstanceList` of a sprite and its score span (begin_sprites).
+    //!   cargo test --lib --manifest-path vm-rust/Cargo.toml span_cache_tests
+    use super::*;
+    use crate::player::allocator::ScriptInstanceAllocatorTrait;
+    use crate::player::handlers::datum_handlers::list_handlers::ListDatumHandlers;
+    use crate::player::script::ScriptInstance;
+    use crate::player::symbols::symbol_table::init_symbol_table;
+    use crate::player::testing::{run_test, TestPlayer};
+
+    const CH: i16 = 7;
+
+    /// A behaviour instance as begin_sprites makes one (its script need not exist for these tests).
+    fn instance(p: &mut DirPlayer) -> ScriptInstanceRef {
+        let id = p.allocator.get_free_script_instance_id();
+        p.allocator.alloc_script_instance(ScriptInstance {
+            instance_id: id,
+            script: CastMemberRef { cast_lib: 1, cast_member: 999 },
+            ancestor: None,
+            properties: Default::default(),
+            begin_sprite_called: false,
+        })
+    }
+
+    /// Lingo's `the scriptInstanceList of sprite CH`: the list datum the getter hands out (cached from then on).
+    fn read_list(p: &mut DirPlayer) -> DatumRef {
+        sprite_get_prop(p, CH, Symbol::builtin(BuiltInSymbol::ScriptInstanceList)).unwrap();
+        p.last_sprite_prop_ref.take().expect("the getter hands out its cached list")
+    }
+
+    fn setup() {
+        reserve_player_mut(|p| {
+            p.movie.score.set_channel_count(20);
+            p.movie.score.sprite_spans.clear();
+        });
+    }
+
+    /// Enter a span on CH at frame 1 and attach `n` behaviours the way begin_sprites does (pushed onto the sprite's Vec).
+    fn enter_span_with(n: usize) -> Vec<ScriptInstanceRef> {
+        reserve_player_mut(|p| {
+            p.movie.score.sprite_spans.push(ScoreSpriteSpan { channel_number: CH as u32, start_frame: 1, end_frame: 10, scripts: vec![] });
+            p.movie.score.begin_sprites(ScoreRef::Stage, 1);
+            let made: Vec<_> = (0..n).map(|_| instance(p)).collect();
+            p.movie.score.get_sprite_mut(CH).script_instance_list.extend(made.iter().cloned());
+            made
+        })
+    }
+
+    fn sprite_list(p: &DirPlayer) -> Vec<u32> {
+        p.movie.score.get_sprite(CH).map(|s| ids(&s.script_instance_list)).unwrap_or_default()
+    }
+
+    fn ids(refs: &[ScriptInstanceRef]) -> Vec<u32> {
+        refs.iter().map(|r| r.id()).collect()
+    }
+
+    #[test]
+    fn a_list_read_before_the_span_does_not_strip_the_spans_behaviours() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            setup();
+            // The title screen: no span on CH; a page reads its scriptInstanceList, an empty list, which is cached.
+            reserve_player_mut(|p| {
+                let l = read_list(p);
+                assert!(matches!(p.get_datum(&l), Datum::List(_, items, _) if items.is_empty()));
+            });
+            // The world frame: the span enters with its 13 behaviours (the mob sprites of ROTL).
+            let attached = enter_span_with(13);
+            // End of frame: every cached list is synced back to its sprite. Before the fix this copied the empty list over the 13.
+            reserve_player_mut(|p| {
+                p.sync_all_script_instance_lists();
+                assert_eq!(sprite_list(p), ids(&attached), "the span's behaviours survive the sync");
+                // And a read now sees them.
+                let l = read_list(p);
+                assert!(matches!(p.get_datum(&l), Datum::List(_, items, _) if items.len() == 13));
+            });
+        });
+    }
+
+    #[test]
+    fn lingo_adds_and_deletes_on_the_list_still_reach_the_sprite() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            setup();
+            let attached = enter_span_with(2);
+            // add(the scriptInstanceList of sprite CH, x): the live list, synced back to the sprite.
+            let (list, extra) = reserve_player_mut(|p| {
+                let list = read_list(p);
+                let extra = instance(p);
+                let extra_ref = p.alloc_datum(Datum::ScriptInstanceRef(extra.clone()));
+                (list, (extra, extra_ref))
+            });
+            ListDatumHandlers::add(&list, &vec![extra.1.clone()]).unwrap();
+            reserve_player_mut(|p| {
+                p.sync_all_script_instance_lists();
+                let mut want = attached.clone();
+                want.push(extra.0.clone());
+                assert_eq!(sprite_list(p), ids(&want), "an add reaches the sprite");
+            });
+            // deleteAt(the scriptInstanceList of sprite CH, 1): also synced; the same datum is handed out again.
+            let again = reserve_player_mut(|p| read_list(p));
+            assert_eq!(again.unwrap(), list.unwrap(), "inside the span the getter keeps handing out the same live list");
+            let one = reserve_player_mut(|p| p.alloc_datum(Datum::Int(1)));
+            ListDatumHandlers::delete_at(&list, &vec![one]).unwrap();
+            reserve_player_mut(|p| {
+                p.sync_all_script_instance_lists();
+                assert_eq!(sprite_list(p), vec![attached[1].id(), extra.0.id()], "a delete reaches the sprite");
+            });
+        });
+    }
+
+    #[test]
+    fn an_add_made_before_the_span_is_kept_with_the_spans_behaviours() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            setup();
+            let (list, early) = reserve_player_mut(|p| {
+                let list = read_list(p);
+                let early = instance(p);
+                let r = p.alloc_datum(Datum::ScriptInstanceRef(early.clone()));
+                (list, (early, r))
+            });
+            ListDatumHandlers::add(&list, &vec![early.1.clone()]).unwrap();
+            let attached = enter_span_with(3);
+            reserve_player_mut(|p| {
+                p.sync_all_script_instance_lists();
+                let mut want = vec![early.0.clone()];
+                want.extend(attached.iter().cloned());
+                assert_eq!(sprite_list(p), ids(&want));
+            });
+        });
     }
 }
