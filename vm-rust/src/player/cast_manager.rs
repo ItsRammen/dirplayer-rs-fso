@@ -838,6 +838,26 @@ impl CastManager {
         self.casts.iter().any(|c| c.state == CastLibState::Loading)
     }
 
+    /// A member was just inserted, with a name no member of any cast has (the caller checked, e.g. through
+    /// `find_member_ref_by_name`). Brings the name and number tables up to date where they stand, which is what a rebuild would
+    /// give, instead of dropping them: rebuilding the name table walks every member of every cast. ROTL custom art adds
+    /// hundreds of pictures this way (player/rotl_art.rs). The member's own cast drops its name index (`insert_member` does).
+    pub fn note_member_added(&self, cast_number: u32, member_number: u32, name: &str) {
+        if !name.is_empty() {
+            if let Some(cache) = self.member_name_cache.borrow_mut().as_mut() {
+                cache.entry(name.to_ascii_lowercase()).or_insert(CastMemberRef {
+                    cast_lib: cast_number as i32,
+                    cast_member: member_number as i32,
+                });
+            }
+        }
+        // find_member_ref_by_number matches a member's own number in any cast, or its slot number: those two answers can change.
+        if let Some(cache) = self.member_number_cache.borrow_mut().as_mut() {
+            cache.remove(&member_number);
+            cache.remove(&CastMemberRefHandlers::get_cast_slot_number(cast_number, member_number));
+        }
+    }
+
     pub fn invalidate_member_name_cache(&self) {
         self.member_name_cache.replace(None);
         self.member_number_cache.replace(None);

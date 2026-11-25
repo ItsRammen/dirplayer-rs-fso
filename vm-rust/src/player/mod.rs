@@ -51,6 +51,7 @@ pub mod xtra;
 pub mod score_keyframes;
 pub mod stream_status;
 pub mod virtual_scripts;
+pub mod rotl_art;
 pub mod rotl_hooks;
 pub mod console;
 pub mod testing_shared;
