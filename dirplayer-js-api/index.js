@@ -122,10 +122,21 @@ export function onChannelDisplayNamesChanged(names) {
   vmCallbacks.onChannelDisplayNamesChanged(names)
 }
 
+// Lingo's externalEvent(string). The host page may listen through window.__rotlLingoEvent (ROTL: the movie says
+// when its state changed). The page is called after the Lingo call that sent the event has returned (a timer), so it
+// may call back into the player.
 export function onExternalEvent(event) {
+  const page = typeof window !== 'undefined' ? window : undefined;
+  const pageListens = !!page && typeof page.__rotlLingoEvent === 'function';
+  if (pageListens) {
+    const text = String(event);
+    setTimeout(() => {
+      try { page.__rotlLingoEvent(text); } catch (e) { console.warn('__rotlLingoEvent:', e); }
+    }, 0);
+  }
   if (vmCallbacks?.onExternalEvent) {
     vmCallbacks.onExternalEvent(event);
-  } else {
+  } else if (!pageListens) {
     console.log('externalEvent:', event);
   }
 }
