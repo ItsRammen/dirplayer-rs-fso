@@ -541,7 +541,7 @@ pub fn rotl_member_image(cast_lib: i32, cast_member: i32) -> JsValue {
 
 /// ROTL custom art: adds a bitmap member called `name` to the cast library `cast_name` (by name, e.g. "Inventory"), from the bytes of
 /// a PNG (or any picture the player decodes), with its registration point. The page calls it before the movie needs the picture, so
-/// the movie finds the member by name like one of its own.
+/// the movie finds the member by name like one of its own. For many pictures at once, `rotl_add_bitmaps`.
 ///
 /// Returns `{ ok: true, castLib, member, width, height }`, or `{ ok: false, error }`. A name the movie already has (in any cast) is
 /// refused, unless `replace` is true: then that member, which must be a bitmap, gets the new picture and registration point instead.
@@ -549,25 +549,103 @@ pub fn rotl_member_image(cast_lib: i32, cast_member: i32) -> JsValue {
 /// key colour, applies as for its own members.
 #[wasm_bindgen]
 pub fn rotl_add_bitmap(cast_name: &str, name: &str, image: &[u8], reg_x: i32, reg_y: i32, replace: bool) -> JsValue {
+    use player::rotl_art::{ArtAdd, ArtPixels};
+    let add = ArtAdd { cast: cast_name, name, pixels: ArtPixels::Encoded(image), reg_x, reg_y, replace };
+    let result = player::rotl_art::prepare(add).and_then(|p| reserve_player_mut(|player| player::rotl_art::install(player, p)));
+    if let Ok(added) = &result {
+        rotl_art_changed(added.member.cast_lib as u32, std::slice::from_ref(&added.member));
+    }
+    rotl_art_answer(result)
+}
+
+/// ROTL custom art, many pictures at once: an array of `{ cast, name, png, regX, regY, replace }`, `png` a Uint8Array of a PNG
+/// (or any picture the player decodes); or `rgba` (Uint8Array or Uint8ClampedArray, 4 bytes a pixel) with `width` and `height`
+/// instead of `png`. Each is added as `rotl_add_bitmap` adds one, in the order given (a name taken earlier in the same array is
+/// refused like any other), and the cast lists are announced once a cast instead of once a picture.
+///
+/// Returns an array of answers in the same order, each as `rotl_add_bitmap` gives it: `{ ok: true, castLib, member, width,
+/// height }` or `{ ok: false, error }`. An entry that is not an object, or lacks a field, is refused alone.
+#[wasm_bindgen]
+pub fn rotl_add_bitmaps(entries: &JsValue) -> JsValue {
+    use player::rotl_art::{ArtAdd, ArtPixels};
+    use wasm_bindgen::JsCast;
+    let out = js_sys::Array::new();
+    let Some(list) = entries.dyn_ref::<js_sys::Array>() else {
+        out.push(&rotl_art_answer(Err("rotl_add_bitmaps takes an array".to_string())));
+        return out.into();
+    };
+    let get = |o: &JsValue, key: &str| js_sys::Reflect::get(o, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED);
+    let mut added: Vec<CastMemberRef> = Vec::new();
+    for entry in list.iter() {
+        let result = (|| {
+            if !entry.is_object() {
+                return Err("not an object".to_string());
+            }
+            let text = |key: &str| get(&entry, key).as_string().ok_or_else(|| format!("no {}", key));
+            let int = |key: &str| get(&entry, key).as_f64().map(|v| v as i32).unwrap_or(0);
+            let (cast, name) = (text("cast")?, text("name")?);
+            let png = get(&entry, "png");
+            let encoded;
+            let pixels = if png.is_object() {
+                encoded = js_sys::Uint8Array::new(&png).to_vec();
+                ArtPixels::Encoded(&encoded)
+            } else {
+                let rgba = get(&entry, "rgba");
+                if !rgba.is_object() {
+                    return Err(format!("{}: no png, and no rgba", name));
+                }
+                ArtPixels::Rgba {
+                    width: get(&entry, "width").as_f64().unwrap_or(0.0) as u32,
+                    height: get(&entry, "height").as_f64().unwrap_or(0.0) as u32,
+                    data: js_sys::Uint8Array::new(&rgba).to_vec(),
+                }
+            };
+            let replace = get(&entry, "replace").as_bool() == Some(true);
+            let add = ArtAdd { cast: &cast, name: &name, pixels, reg_x: int("regX"), reg_y: int("regY"), replace };
+            let prepared = player::rotl_art::prepare(add)?;
+            reserve_player_mut(|player| player::rotl_art::install(player, prepared))
+        })();
+        if let Ok(a) = &result {
+            added.push(a.member.clone());
+        }
+        out.push(&rotl_art_answer(result));
+    }
+    let mut casts: Vec<u32> = added.iter().map(|m| m.cast_lib as u32).collect();
+    casts.sort_unstable();
+    casts.dedup();
+    for cast in casts {
+        let members: Vec<CastMemberRef> = added.iter().filter(|m| m.cast_lib as u32 == cast).cloned().collect();
+        rotl_art_changed(cast, &members);
+    }
+    out.into()
+}
+
+/// Tells the player's inspector (the dev UI) about members custom art added or changed: as the movie's own new members do.
+fn rotl_art_changed(cast: u32, members: &[CastMemberRef]) {
+    JsApi::dispatch_cast_member_list_changed(cast);
+    for member_ref in members {
+        JsApi::on_cast_member_name_changed(
+            player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers::get_cast_slot_number(
+                member_ref.cast_lib as u32,
+                member_ref.cast_member as u32,
+            ),
+        );
+        JsApi::dispatch_cast_member_changed(member_ref.clone());
+    }
+}
+
+fn rotl_art_answer(result: Result<player::rotl_art::ArtAdded, String>) -> JsValue {
     let object = js_sys::Object::new();
     let set = |key: &str, value: JsValue| {
         let _ = js_sys::Reflect::set(&object, &JsValue::from_str(key), &value);
     };
-    match rotl_add_bitmap_member(cast_name, name, image, reg_x, reg_y, replace) {
-        Ok((member_ref, width, height)) => {
-            JsApi::dispatch_cast_member_list_changed(member_ref.cast_lib as u32);
-            JsApi::on_cast_member_name_changed(
-                player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers::get_cast_slot_number(
-                    member_ref.cast_lib as u32,
-                    member_ref.cast_member as u32,
-                ),
-            );
-            JsApi::dispatch_cast_member_changed(member_ref.clone());
+    match result {
+        Ok(added) => {
             set("ok", JsValue::TRUE);
-            set("castLib", JsValue::from_f64(member_ref.cast_lib as f64));
-            set("member", JsValue::from_f64(member_ref.cast_member as f64));
-            set("width", JsValue::from_f64(width as f64));
-            set("height", JsValue::from_f64(height as f64));
+            set("castLib", JsValue::from_f64(added.member.cast_lib as f64));
+            set("member", JsValue::from_f64(added.member.cast_member as f64));
+            set("width", JsValue::from_f64(added.width as f64));
+            set("height", JsValue::from_f64(added.height as f64));
         }
         Err(error) => {
             set("ok", JsValue::FALSE);
@@ -575,106 +653,6 @@ pub fn rotl_add_bitmap(cast_name: &str, name: &str, image: &[u8], reg_x: i32, re
         }
     }
     object.into()
-}
-
-fn rotl_add_bitmap_member(
-    cast_name: &str,
-    name: &str,
-    image: &[u8],
-    reg_x: i32,
-    reg_y: i32,
-    replace: bool,
-) -> Result<(CastMemberRef, u16, u16), String> {
-    use crate::director::enums::BitmapInfo;
-    use player::bitmap::bitmap::{Bitmap, BuiltInPalette, PaletteRef};
-    use player::cast_member::{BitmapMember, CastMember};
-
-    const MAX_SIDE: u32 = 1024;
-    if name.is_empty() || name.len() > 255 || name.trim() != name {
-        return Err(format!("bad member name {:?}", name));
-    }
-    let decoded = image::load_from_memory(image)
-        .map_err(|e| format!("{}: cannot decode the picture ({} bytes): {}", name, image.len(), e))?
-        .to_rgba8();
-    let (w, h) = decoded.dimensions();
-    if w == 0 || h == 0 || w > MAX_SIDE || h > MAX_SIDE {
-        return Err(format!("{}: picture is {}x{} (1 to {} pixels a side)", name, w, h, MAX_SIDE));
-    }
-    if reg_x.abs() > 0x7FFF || reg_y.abs() > 0x7FFF {
-        return Err(format!("{}: registration point ({}, {}) out of range", name, reg_x, reg_y));
-    }
-    let (w, h) = (w as u16, h as u16);
-    let mut bitmap = Bitmap::new(w, h, 32, 32, 8, PaletteRef::BuiltIn(BuiltInPalette::SystemWin));
-    bitmap.data = decoded.into_raw();
-    bitmap.trim_white_space = false;
-    let info = BitmapInfo {
-        width: w,
-        height: h,
-        reg_x: reg_x as i16,
-        reg_y: reg_y as i16,
-        bit_depth: 32,
-        pitch: w.saturating_mul(4),
-        trim_white_space: false,
-        ..BitmapInfo::default()
-    };
-
-    reserve_player_mut(|player| {
-        let cast_index = player
-            .movie
-            .cast_manager
-            .casts
-            .iter()
-            .position(|c| c.name.eq_ignore_ascii_case(cast_name))
-            .ok_or_else(|| format!("{}: the movie has no cast library {:?}", name, cast_name))?;
-
-        if let Some(existing) = player.movie.cast_manager.find_member_ref_by_name(name) {
-            if !replace {
-                return Err(format!(
-                    "{}: the movie already has a member of that name (member {} of castLib {})",
-                    name, existing.cast_member, existing.cast_lib
-                ));
-            }
-            let member = player
-                .movie
-                .cast_manager
-                .find_mut_member_by_ref(&existing)
-                .ok_or_else(|| format!("{}: member vanished", name))?;
-            let image_ref = match &mut member.member_type {
-                CastMemberType::Bitmap(b) => {
-                    b.info = BitmapInfo { palette_id: b.info.palette_id, clut_cast_lib: b.info.clut_cast_lib, ..info };
-                    b.reg_point = (reg_x as i16, reg_y as i16);
-                    b.image_ref
-                }
-                _ => return Err(format!("{}: the existing member is not a bitmap", name)),
-            };
-            member.reg_point = (reg_x, reg_y);
-            player.bitmap_manager.replace_bitmap(image_ref, bitmap);
-            return Ok((existing, w, h));
-        }
-
-        let cast = &mut player.movie.cast_manager.casts[cast_index];
-        let number = cast.first_free_member_id();
-        if number == 0 {
-            return Err(format!("{}: cast library {:?} is full", name, cast_name));
-        }
-        let image_ref = player.bitmap_manager.add_bitmap(bitmap);
-        let mut member = CastMember::new(
-            number,
-            CastMemberType::Bitmap(BitmapMember {
-                image_ref,
-                reg_point: (reg_x as i16, reg_y as i16),
-                script_id: 0,
-                member_script_ref: None,
-                info,
-            }),
-        );
-        member.name = name.to_string();
-        member.reg_point = (reg_x, reg_y);
-        let cast_number = cast.number;
-        cast.insert_member(number, member, &mut player.bitmap_manager);
-        player.movie.cast_manager.invalidate_member_name_cache();
-        Ok((cast_member_ref(cast_number as i32, number as i32), w, h))
-    })
 }
 
 #[wasm_bindgen]
