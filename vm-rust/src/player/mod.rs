@@ -2188,6 +2188,17 @@ impl DirPlayer {
         self.script_instance_list_ids_cache.remove(&sprite_id);
     }
 
+    /// A channel entering a score span: the list cached for it (if any) goes back to the sprite, then the cache is dropped, so
+    /// a list read before the span (an empty one) cannot be synced over the behaviours the span attaches (see begin_sprites).
+    pub fn forget_script_instance_list_cache_on_span_entry(&mut self, sprite_id: i16) {
+        if !self.script_instance_list_cache.contains_key(&sprite_id) {
+            return;
+        }
+        self.sync_script_instance_list(sprite_id);
+        self.remove_script_instance_list_cache(sprite_id);
+        self.refresh_stage_behavior_channel_cache_entry(sprite_id);
+    }
+
     pub fn clear_script_instance_list_caches(&mut self) {
         self.script_instance_list_cache.clear();
         self.script_instance_list_cache_owner.clear();
