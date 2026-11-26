@@ -12,7 +12,7 @@ pub trait MusWriter {
 
 impl MusWriter for BinaryWriter<'_> {
     fn write_mus_string(&mut self, value: &str) -> Result<usize, BinaryError> {
-        let bytes: Vec<u8> = value.chars().map(|c| c as u8).collect();
+        let bytes = latin1_bytes(value);
         let len = bytes.len();
         let mut written = self.write_u32(len as u32)?;
         written += self.write_bytes(&bytes)?;
@@ -130,5 +130,53 @@ impl MultiuserMessage {
             w.write_bytes(&payload_bytes).unwrap();
         }
         msg_stream.into()
+    }
+}
+
+
+/// The bytes of a string as the game's wire carries it: one per letter, Latin-1 (NodeJS-ROTL docs/text-encoding.md). A letter past Latin-1
+/// used to be cut to its low byte (`c as u8`: a typed "\u{2019}" became the control byte 0x19, "\u{20AC}" became "\u{AC}"); it now gets the
+/// same plain stand-in the server and the page use (quotes, dashes, the ellipsis, the euro), or "?". Never `"` or `\\`.
+pub fn latin1_bytes(value: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(value.len());
+    for c in value.chars() {
+        let code = c as u32;
+        if code <= 0xFF {
+            out.push(code as u8);
+            continue;
+        }
+        let stand_in: &str = match c {
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' | '\u{2032}' | '\u{02BC}' | '\u{2039}' | '\u{203A}'
+            | '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' | '\u{2033}' => "'",
+            '\u{2010}'..='\u{2015}' | '\u{2212}' => "-",
+            '\u{2026}' => "...",
+            '\u{2022}' => "*",
+            '\u{20AC}' => "EUR",
+            '\u{2122}' => "TM",
+            '\u{0152}' => "OE",
+            '\u{0153}' => "oe",
+            '\u{2000}'..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}' => " ",
+            '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' | '\u{FE0E}' | '\u{FE0F}' => "",
+            _ => "?",
+        };
+        out.extend_from_slice(stand_in.as_bytes());
+    }
+    out
+}
+
+#[cfg(test)]
+mod latin1_tests {
+    use super::latin1_bytes;
+
+    #[test]
+    fn portuguese_is_one_byte_per_letter() {
+        assert_eq!(latin1_bytes("Voc\u{EA} p\u{E3}o \u{C7}"), vec![b'V', b'o', b'c', 0xEA, b' ', b'p', 0xE3, b'o', b' ', 0xC7]);
+        assert_eq!(latin1_bytes("plain ASCII"), b"plain ASCII".to_vec());
+    }
+
+    #[test]
+    fn letters_past_latin1_get_a_stand_in_not_a_control_byte() {
+        assert_eq!(latin1_bytes("It\u{2019}s \u{201C}ok\u{201D} \u{2014} 5\u{20AC}\u{2026}"), b"It's 'ok' - 5EUR...".to_vec());
+        assert_eq!(latin1_bytes("\u{65E5}\u{1F600}"), b"??".to_vec());
     }
 }

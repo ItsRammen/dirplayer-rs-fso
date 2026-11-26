@@ -1340,7 +1340,12 @@ impl FontMemberHandlers {
                         if hit.is_some() {
                             last_rect = hit;
                         }
-                        hit.map(|i| seg_color_rects[i].4).unwrap_or(fallback_color)
+                        // A glyph's mark can reach past its cell (the accent on a capital: "É", "Ã" sit above the top of a 12 px line), and a
+                        // pixel no rect covers took the fallback colour, black: in ROTL's chat (light text on black) every capital lost its accent.
+                        // Such a pixel takes the colour of the segment just above or below it.
+                        hit.or_else(|| nearest_color_rect(&seg_color_rects, fx, fy))
+                            .map(|i| seg_color_rects[i].4)
+                            .unwrap_or(fallback_color)
                     };
                     bitmap.data[dest_idx] = fg_r;
                     bitmap.data[dest_idx + 1] = fg_g;
@@ -2703,5 +2708,42 @@ impl FontMemberHandlers {
                 Ok(())
             },
         )
+    }
+}
+
+/// The colour rect a pixel just outside every rect belongs to: one whose columns hold the pixel and whose top or bottom is
+/// nearest, within half the rect's height (a mark above a capital, a descender below the cell). None when nothing is that close.
+pub(crate) fn nearest_color_rect(rects: &[(f64, f64, f64, f64, (u8, u8, u8))], fx: f64, fy: f64) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (i, &(x0, x1, yt, yb, _)) in rects.iter().enumerate() {
+        if fx < x0 || fx >= x1 {
+            continue;
+        }
+        let dist = if fy < yt { yt - fy } else if fy >= yb { fy - yb + 1.0 } else { 0.0 };
+        if dist > (yb - yt) * 0.5 {
+            continue;
+        }
+        if best.map_or(true, |(_, d)| dist < d) {
+            best = Some((i, dist));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+#[cfg(test)]
+mod nearest_color_rect_tests {
+    use super::nearest_color_rect;
+
+    const WHITE: (u8, u8, u8) = (255, 255, 255);
+    const YELLOW: (u8, u8, u8) = (255, 255, 0);
+
+    #[test]
+    fn an_accent_above_a_line_takes_that_lines_colour() {
+        // two 12 px lines, 16 px apart: white on top, yellow below
+        let rects = [(0.0, 100.0, 0.0, 12.0, WHITE), (0.0, 100.0, 16.0, 28.0, YELLOW)];
+        assert_eq!(nearest_color_rect(&rects, 10.0, 14.0), Some(1)); // 2 px above the yellow line, 3 px below the white one
+        assert_eq!(nearest_color_rect(&rects, 10.0, 12.0), Some(0)); // right under the white line
+        assert_eq!(nearest_color_rect(&rects, 10.0, 40.0), None); // far below everything
+        assert_eq!(nearest_color_rect(&rects, 150.0, 14.0), None); // beside the text
     }
 }
