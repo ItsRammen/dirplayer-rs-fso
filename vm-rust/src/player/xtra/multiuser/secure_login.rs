@@ -25,7 +25,9 @@ pub const SUBJECT_CHALLENGE: &str = "OpaqueLogin";
 pub const SUBJECT_FINISH: &str = "OpaqueFinish";
 /// Server → player: this account has no OPAQUE record yet, only a bcrypt hash; the content is the hash's salt part.
 pub const SUBJECT_LEGACY: &str = "OpaqueLegacy";
-/// Player → server: `hash|registrationRequest`, the bcrypt hash computed here, and the start of a registration.
+/// Player → server: `hash|registrationRequest|oldReadingHash`, the bcrypt hash computed here, the start of a
+/// registration, and the bcrypt hash of the password as the old server read it (`old_server_reading`; the same as the
+/// first when that reading is the password itself).
 pub const SUBJECT_MIGRATE: &str = "OpaqueMigrate";
 /// Server → player: the server's answer to the registration request.
 pub const SUBJECT_REGISTER_RESPONSE: &str = "OpaqueRegisterResponse";
@@ -113,11 +115,22 @@ impl SecureLogin {
     /// The server says this account has only a bcrypt hash. Works out that hash here from the salt the server sent and
     /// starts a registration, so the server can check the hash and store a record without ever seeing the password.
     /// Returns the content for `OpaqueMigrate`.
+    ///
+    /// A password with an accent, chosen in the game before the server read the wire as Latin-1, was hashed as that
+    /// server read it (see `old_server_reading`), so this hash cannot match. The hash of that reading goes too, as a
+    /// third field; it is the first one again when there is no other reading, so every message has the same shape and
+    /// the server cannot tell (nor anyone else) whether the password has an accent. The server accepts either, says
+    /// the same thing whichever matched, and the registration is always of the password as typed, so the account's
+    /// record is right from then on.
     pub fn answer_legacy(&mut self, salt_part: &str) -> Result<String, String> {
         let proof = bcrypt_proof(&self.password, salt_part)?;
+        let old_proof = match old_server_reading(&self.password) {
+            Some(old) => bcrypt_proof(&old, salt_part)?,
+            None => proof.clone(),
+        };
         let started = rotl_opaque::client_registration_start(self.password.as_bytes()).map_err(|e| e.to_string())?;
         self.registration = Some(started.state);
-        Ok(format!("{}|{}", proof, STANDARD.encode(&started.request)))
+        Ok(format!("{}|{}|{}", proof, STANDARD.encode(&started.request), old_proof))
     }
 
     /// The server answered the registration request. Returns the content for `OpaqueRegisterFinish`.
@@ -238,6 +251,20 @@ impl SecureLogin {
     }
 }
 
+/// The password as the server read it before it read the wire as Latin-1 (NodeJS-ROTL `docs/text-encoding.md`), or
+/// `None` when that is the password itself. This Xtra sent one byte per letter (`c as u8`, before `latin1_bytes`), and
+/// that server read those bytes as UTF-8, so a lone accented letter became U+FFFD ("maçã" was hashed as "ma\u{FFFD}\u{FFFD}").
+/// `from_utf8_lossy` replaces bad bytes exactly as Node's `Buffer.toString('utf8')` does (one U+FFFD per maximal bad
+/// part): the tests check this against hashes Node made.
+pub fn old_server_reading(password: &str) -> Option<String> {
+    if password.is_ascii() {
+        return None;
+    }
+    let bytes: Vec<u8> = password.chars().map(|c| c as u8).collect();
+    let old = String::from_utf8_lossy(&bytes).into_owned();
+    (old != password).then_some(old)
+}
+
 /// bcrypt's own base64 alphabet (not the usual one).
 const BCRYPT_ALPHABET: &[u8; 64] = b"./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -328,8 +355,10 @@ mod tests {
         assert!(field.starts_with(LOGON_PREFIX));
         // The server's half: no record yet, only the hash, so it sends the salt and later checks the proof.
         let migrate = login.answer_legacy(&stored[..29]).unwrap();
-        let (proof, request) = migrate.split_once('|').unwrap();
+        let fields: Vec<&str> = migrate.split('|').collect();
+        let [proof, request, old_proof] = fields[..] else { panic!("three fields: {migrate:?}") };
         assert_eq!(proof, stored, "the server can compare this with what it stored");
+        assert_eq!(old_proof, proof, "no other reading of a plain password: the same hash again");
         assert!(!migrate.contains(password));
         let setup = rotl_opaque::server_setup_new();
         let response = rotl_opaque::server_registration_start(&setup, &STANDARD.decode(request).unwrap(), "Alice").unwrap();
@@ -342,6 +371,61 @@ mod tests {
         let (challenge, state) = server_answers(&setup, Some(&record), "Alice", &field);
         let finish = again.answer_challenge(&challenge).unwrap();
         assert!(rotl_opaque::server_login_finish(&state, &STANDARD.decode(finish).unwrap(), "Alice").is_ok());
+    }
+
+    /// (password, what Node's `Buffer.from(bytes).toString('utf8')` makes of its one-byte-per-letter bytes): the old server's reading.
+    const OLD_READINGS: &[(&str, &str)] = &[
+        ("ma\u{E7}\u{E3}1234", "ma\u{FFFD}\u{FFFD}1234"),
+        ("A\u{E7}\u{E3}o \u{E9} j\u{E1}", "A\u{FFFD}\u{FFFD}o \u{FFFD} j\u{FFFD}"),
+        ("\u{C3}\u{A9}tude", "\u{E9}tude"),
+        ("p\u{E3}o\u{20AC}x", "p\u{FFFD}o\u{FFFD}x"),
+        ("\u{E0}\u{E9}!", "\u{FFFD}\u{FFFD}!"),
+        ("\u{F0}\u{178}", "\u{FFFD}x"),
+        ("na\u{EF}ve\u{2014}\u{FC}ber", "na\u{FFFD}ve\u{14}\u{FFFD}ber"),
+        ("\u{FF}\u{FF}\u{FF}", "\u{FFFD}\u{FFFD}\u{FFFD}"),
+        ("\u{C2}\u{C2}\u{20AC}", "\u{FFFD}\u{AC}"),
+    ];
+
+    /// (password typed, the hash the OLD server stored: Node's bcrypt of its reading of the password).
+    const OLD_SERVER_HASHES: &[(&str, &str)] = &[
+        ("ma\u{E7}\u{E3}1234", "$2b$04$.8kvPBJToXFmce2y76mJI.Cm23oJf5FktN4HdfCZiAGq.Z5KBNiVy"),
+        ("senha \u{E7}\u{E3}o", "$2b$04$rsbD9EAutQXt1N4ODlOiOe/5BgDQjKuuw6iKxzwKCPiAT/8Pv0tUK"),
+        ("\u{C3}\u{A9}tude", "$2b$04$oy7rDcKSFzj32TT7i0N4RuA7b6D2jcwWvMKFjm2PLut1Uggnx7zai"),
+    ];
+
+    #[test]
+    fn the_old_servers_reading_is_the_one_node_made() {
+        for (password, old) in OLD_READINGS {
+            assert_eq!(old_server_reading(password).as_deref(), Some(*old), "password {:?}", password);
+        }
+        for plain in ["", "hunter2", "correct horse battery staple", "p@ss:word|with%odd chars"] {
+            assert_eq!(old_server_reading(plain), None, "{plain:?} reads the same");
+        }
+        // Text that is already what the old server would make of it has no other reading.
+        assert_eq!(old_server_reading("\u{FFFD}"), None);
+    }
+
+    #[test]
+    fn an_old_account_with_an_accented_password_upgrades_through_the_third_field() {
+        for (password, stored) in OLD_SERVER_HASHES {
+            let (mut login, _) = SecureLogin::begin("Alice", password).unwrap();
+            let migrate = login.answer_legacy(&stored[..29]).unwrap();
+            let fields: Vec<&str> = migrate.split('|').collect();
+            let [proof, request, old_proof] = fields[..] else { panic!("three fields") };
+            assert_ne!(proof, *stored, "the password as typed does not make the old hash ({password:?})");
+            assert_eq!(old_proof, *stored, "the old reading does ({password:?})");
+            assert_eq!(proof, bcrypt_proof(password, &stored[..29]).unwrap(), "the first field is still the typed password's hash");
+            assert!(!migrate.contains(password) && !migrate.contains(&old_server_reading(password).unwrap()));
+            // The registration is of the password as typed, so the next login (OPAQUE) works with what the player types.
+            let setup = rotl_opaque::server_setup_new();
+            let response = rotl_opaque::server_registration_start(&setup, &STANDARD.decode(request).unwrap(), "Alice").unwrap();
+            let upload = login.answer_register_response(&STANDARD.encode(&response)).unwrap();
+            let record = rotl_opaque::server_registration_finish(&STANDARD.decode(upload).unwrap()).unwrap();
+            let (mut again, field) = SecureLogin::begin("Alice", password).unwrap();
+            let (challenge, state) = server_answers(&setup, Some(&record), "Alice", &field);
+            let finish = again.answer_challenge(&challenge).unwrap();
+            assert!(rotl_opaque::server_login_finish(&state, &STANDARD.decode(finish).unwrap(), "Alice").is_ok());
+        }
     }
 
     #[test]
